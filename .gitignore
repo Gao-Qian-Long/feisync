@@ -29,3 +29,6 @@ npm-debug.log*
 # 临时文件
 *.tmp
 *.temp
+
+# 本地配置文件（包含敏感凭证）
+data.json
