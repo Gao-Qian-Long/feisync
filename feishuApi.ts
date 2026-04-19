@@ -136,17 +136,17 @@ export class FeishuApiClient {
 
   /**
    * 创建文件夹
-   * 注意：根据飞书 API，可能需要使用不同的端点
+   * 飞书创建文件夹的 API 端点：POST /drive/v1/files/create_folder
    */
   async createFolder(folderName: string, parentToken: string): Promise<string> {
     try {
       const headers = await this.getHeaders();
-      // 飞书创建文件夹的 API 端点
-      const endpoint = `${FEISHU_DRIVE_API_BASE}/files`;
+      // 正确的飞书创建文件夹 API 端点
+      const endpoint = `${FEISHU_DRIVE_API_BASE}/files/create_folder`;
 
       const body: any = {
         name: folderName,
-        type: 'folder',
+        folder_type: 'doc',
       };
 
       if (parentToken) {

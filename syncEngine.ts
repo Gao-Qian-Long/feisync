@@ -155,9 +155,12 @@ export class SyncEngine {
       throw new Error(`文件大小超过20MB限制`);
     }
 
-    // 检查是否已存在同名文件（可选的覆盖逻辑）
-    // 目前我们直接上传，如果存在则创建新版本或覆盖
-    // 飞书的 API 可能需要先删除再上传，这里简化处理
+    // 检查是否已存在同名文件
+    const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
+    if (existingFile) {
+      console.log(`[Flybook] 文件已存在，将执行覆盖: ${file.name}`);
+      await this.apiClient.deleteFile(existingFile.token);
+    }
 
     // 上传文件
     await this.apiClient.uploadFile(

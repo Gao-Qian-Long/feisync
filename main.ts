@@ -219,7 +219,7 @@ export default class FlybookPlugin extends Plugin {
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
 
-    if (!this.syncEngine.isConfigured()) {
+    if (!this.isConfigured()) {
       throw new Error('请先配置飞书 App ID 和 App Secret');
     }
 
@@ -230,6 +230,13 @@ export default class FlybookPlugin extends Plugin {
     console.log('[Flybook] 开始同步...');
     await this.syncEngine.sync();
     console.log('[Flybook] 同步流程结束');
+  }
+
+  /**
+   * 检查插件是否已配置（凭证是否完整）
+   */
+  isConfigured(): boolean {
+    return !!this.settings.appId && !!this.settings.appSecret;
   }
 
   /**
