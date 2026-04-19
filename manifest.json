@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-flybook",
+	"name": "Obsidian Flybook",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "Sync your Obsidian notes to Feishu (Lark) Drive",
+	"author": "Your Name",
+	"authorUrl": "https://github.com/your-username",
+	"isDesktopOnly": true,
+	"fundingUrl": []
+}

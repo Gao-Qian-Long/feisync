@@ -1,0 +1,25 @@
+{
+  "name": "obsidian-flybook",
+  "version": "0.1.0",
+  "description": "Sync your Obsidian notes to Feishu (Lark) Drive",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.js --watch",
+    "build": "node esbuild.config.js"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "feishu",
+    "lark",
+    "sync"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^16.18.126",
+    "esbuild": "^0.14.0",
+    "obsidian": "^1.12.3",
+    "typescript": "^4.6.0"
+  }
+}

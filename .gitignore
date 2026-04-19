@@ -1,0 +1,31 @@
+# Node.js 依赖
+node_modules/
+
+# TypeScript 编译输出
+*.js
+*.js.map
+!esbuild.config.js
+
+# 包锁文件
+package-lock.json
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# Obsidian 插件相关
+.obsidian/
+
+# 日志文件
+*.log
+npm-debug.log*
+
+# 临时文件
+*.tmp
+*.temp
