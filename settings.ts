@@ -130,11 +130,11 @@ export class FlybookSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.syncInterval.toString())
             .onChange(async (value: string) => {
               const num = parseInt(value, 10);
-              if (!isNaN(num) && num > 0) {
+              if (!isNaN(num) && num > 0 && num <= 1440) {
                 this.plugin.settings.syncInterval = num;
                 await this.plugin.saveSettings();
               } else {
-                new Notice('请输入有效的数字（大于0）');
+                new Notice('请输入有效的数字（大于0且不超过1440）');
               }
             });
         });

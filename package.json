@@ -14,7 +14,7 @@
     "lark",
     "sync"
   ],
-  "author": "Your Name",
+  "author": "Obsidian Flybook Contributors",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^16.18.126",

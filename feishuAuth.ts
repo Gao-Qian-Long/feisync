@@ -75,8 +75,10 @@ export class FeishuAuthManager {
       }
 
       const token = data.tenant_access_token as string;
-      // 令牌有效期为2小时（7200秒），我们提前5分钟过期以确保安全
-      const tokenLifetimeSeconds = 7200 - TOKEN_EXPIRY_BUFFER_SECONDS;
+      // 从 API 响应中读取令牌有效期（秒），如无则默认 7200 秒（2小时）
+      const expireSeconds = data.expire || 7200;
+      // 提前5分钟过期以确保安全
+      const tokenLifetimeSeconds = expireSeconds - TOKEN_EXPIRY_BUFFER_SECONDS;
       this.cachedToken = token;
       this.tokenExpiry = Date.now() + tokenLifetimeSeconds * 1000;
 
