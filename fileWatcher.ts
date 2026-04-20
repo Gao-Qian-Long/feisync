@@ -58,10 +58,10 @@ export class FileWatcher {
     console.log('[Flybook] 停止文件监控');
 
     // 移除事件监听
-    this.vault.off('create', this.handleCreate as any);
-    this.vault.off('modify', this.handleModify as any);
-    this.vault.off('delete', this.handleDelete as any);
-    this.vault.off('rename', this.handleRename as any);
+    this.vault.off('create', this.handleCreate);
+    this.vault.off('modify', this.handleModify);
+    this.vault.off('delete', this.handleDelete);
+    this.vault.off('rename', this.handleRename);
 
     // 清理所有防抖定时器
     this.debounceTimers.forEach(timer => clearTimeout(timer));

@@ -8,6 +8,9 @@ import { FeishuAuthManager } from './feishuAuth';
 const FEISHU_DRIVE_API_BASE = 'https://open.feishu.cn/open-apis/drive/v1';
 const FEISHU_DOC_API_BASE = 'https://open.feishu.cn/open-apis/doc/v1';
 
+// 请求超时时间（毫秒）
+const REQUEST_TIMEOUT = 30000;
+
 // 文件夹/文件元数据结构
 export interface FeishuFileMeta {
   token: string;
@@ -45,6 +48,28 @@ export class FeishuApiClient {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     };
+  }
+
+  /**
+   * 带超时的 fetch 请求
+   */
+  private async fetchWithTimeout(
+    url: string,
+    options: RequestInit,
+    timeout: number = REQUEST_TIMEOUT
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   /**
@@ -107,7 +132,7 @@ export class FeishuApiClient {
         : `${FEISHU_DRIVE_API_BASE}/files`;
 
       const headers = await this.getHeaders();
-      const response = await fetch(endpoint, {
+      const response = await this.fetchWithTimeout(endpoint, {
         method: 'GET',
         headers,
       });
@@ -139,9 +164,14 @@ export class FeishuApiClient {
    * 飞书创建文件夹的 API 端点：POST /drive/v1/files/create_folder
    */
   async createFolder(folderName: string, parentToken: string): Promise<string> {
+    // 输入校验
+    if (!folderName || folderName.trim() === '') {
+      throw new Error('文件夹名称不能为空');
+    }
+
     try {
       const headers = await this.getHeaders();
-      // 正确的飞书创建文件夹 API 端点
+      // 飞书创建文件夹的 API 端点：POST /drive/v1/files/create_folder
       const endpoint = `${FEISHU_DRIVE_API_BASE}/files/create_folder`;
 
       const body: any = {
@@ -153,7 +183,7 @@ export class FeishuApiClient {
         body.parent_token = parentToken;
       }
 
-      const response = await fetch(endpoint, {
+      const response = await this.fetchWithTimeout(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
@@ -185,6 +215,17 @@ export class FeishuApiClient {
     parentFolderToken: string,
     size: number
   ): Promise<string> {
+    // 输入校验
+    if (!fileContent || fileContent.byteLength === 0) {
+      throw new Error('文件内容不能为空');
+    }
+    if (!fileName || fileName.trim() === '') {
+      throw new Error('文件名不能为空');
+    }
+    if (typeof size !== 'number' || size <= 0) {
+      throw new Error('文件大小无效');
+    }
+
     try {
       const token = await this.authManager.getAccessToken();
 
@@ -199,14 +240,17 @@ export class FeishuApiClient {
       const blob = new Blob([fileContent]);
       formData.append('file', blob, fileName);
 
-      const response = await fetch(`${FEISHU_DRIVE_API_BASE}/medias/upload_all`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          // 注意：不要手动设置 Content-Type，浏览器会自动设置 multipart/form-data
+      const response = await this.fetchWithTimeout(
+        `${FEISHU_DRIVE_API_BASE}/medias/upload_all`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+          body: formData,
         },
-        body: formData,
-      });
+        60000 // 上传文件使用更长超时（60秒）
+      );
 
       const data: FeishuApiResponse<{ file_token: string }> = await response.json();
       if (data.code !== 0) {
@@ -224,11 +268,16 @@ export class FeishuApiClient {
    * 删除文件
    */
   async deleteFile(fileToken: string): Promise<void> {
+    // 输入校验
+    if (!fileToken || fileToken.trim() === '') {
+      throw new Error('文件 token 不能为空');
+    }
+
     try {
       const headers = await this.getHeaders();
       const endpoint = `${FEISHU_DRIVE_API_BASE}/files/${fileToken}`;
 
-      const response = await fetch(endpoint, {
+      const response = await this.fetchWithTimeout(endpoint, {
         method: 'DELETE',
         headers,
       });
