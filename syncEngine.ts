@@ -6,7 +6,7 @@
  */
 
 import { Vault, TFile, TFolder } from 'obsidian';
-import FlybookPlugin from './main';
+import FeiSyncPlugin from './main';
 import { FeishuApiClient } from './feishuApi';
 import { Notice, ProgressBarComponent } from 'obsidian';
 import { SyncLogEntry } from './settings';
@@ -94,11 +94,11 @@ class ConcurrencyPool {
  * 同步引擎类
  */
 export class SyncEngine {
-  private plugin: FlybookPlugin;
+  private plugin: FeiSyncPlugin;
   private apiClient: FeishuApiClient;
   private vault: Vault;
 
-  constructor(plugin: FlybookPlugin, apiClient: FeishuApiClient) {
+  constructor(plugin: FeiSyncPlugin, apiClient: FeishuApiClient) {
     this.plugin = plugin;
     this.apiClient = apiClient;
     this.vault = plugin.app.vault;
@@ -170,7 +170,7 @@ export class SyncEngine {
         }
         if (!localFilePaths.has(filePath)) {
           try {
-            console.log(`[Flybook] 本地文件已删除，同步删除云端: ${filePath}`);
+            console.log(`[FeiSync] 本地文件已删除，同步删除云端: ${filePath}`);
             await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
             recordsToDelete.push(filePath);
             result.deletedCount++;
@@ -179,7 +179,7 @@ export class SyncEngine {
             const msg = `删除云端文件 ${filePath} 失败: ${(error as Error).message}`;
             result.errors.push(msg);
             this.addLog('error', filePath, msg);
-            console.warn('[Flybook]', msg);
+            console.warn('[FeiSync]', msg);
           }
         }
       }
@@ -194,7 +194,6 @@ export class SyncEngine {
       new Notice('同步完成：没有需要同步的文件');
       this.addLog('info', '', '同步完成：没有需要同步的文件');
       await this.plugin.saveSyncRecords(syncRecords);
-      await this.plugin.saveSettings();
       return result;
     }
 
@@ -216,16 +215,15 @@ export class SyncEngine {
           const errorMsg = `同步文件 ${file.path} 失败: ${(error as Error).message}`;
           result.errors.push(errorMsg);
           this.addLog('error', file.path, (error as Error).message);
-          console.error('[Flybook]', errorMsg);
+          console.error('[FeiSync]', errorMsg);
         }
       })
     );
 
     await Promise.all(uploadPromises);
 
-    // 8. 保存同步记录
+    // 8. 保存同步记录（已包含 saveData）
     await this.plugin.saveSyncRecords(syncRecords);
-    await this.plugin.saveSettings();
 
     // 9. 汇总结果
     if (result.failedCount === 0) {
@@ -293,18 +291,26 @@ export class SyncEngine {
     const recordKey = file.path;
     const existingRecord = syncRecords[recordKey];
 
-    // 增量判断：哈希相同且云端文件夹未变 → 跳过
+    // 增量判断：哈希相同且云端文件夹未变 → 还需验证云端文件是否仍然存在
     if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
-      console.log(`[Flybook] 文件未变化，跳过: ${file.path}`);
-      return false;
+      // 校验云端文件是否仍存在（可能被手动删除）
+      const cloudExists = await this.apiClient.checkFileExists(existingRecord.cloudToken, existingRecord.parentFolderToken);
+      if (cloudExists) {
+        console.log(`[FeiSync] 文件未变化，跳过: ${file.path}`);
+        return false;
+      }
+      // 云端文件已不存在，清除旧记录，重新上传
+      console.log(`[FeiSync] 云端文件已不存在，需要重新上传: ${file.path}`);
+      delete syncRecords[recordKey];
+      this.addLog('upload', file.path, '云端文件已丢失，重新上传');
     }
 
     // 文件有变化或为新文件，需要上传
     if (existingRecord) {
-      console.log(`[Flybook] 文件已变化，重新上传: ${file.path}`);
+      console.log(`[FeiSync] 文件已变化，重新上传: ${file.path}`);
       this.addLog('upload', file.path, `文件已变化 (旧哈希: ${existingRecord.hash.substring(0, 8)}...)`);
     } else {
-      console.log(`[Flybook] 新文件，上传: ${file.path}`);
+      console.log(`[FeiSync] 新文件，上传: ${file.path}`);
       this.addLog('upload', file.path, '新文件');
     }
 
@@ -348,9 +354,9 @@ export class SyncEngine {
     if (existingRecord) {
       try {
         await this.apiClient.deleteFile(existingRecord.cloudToken, existingRecord.cloudType);
-        console.log(`[Flybook] 旧文件已删除`);
+        console.log(`[FeiSync] 旧文件已删除`);
       } catch (deleteError) {
-        console.warn(`[Flybook] 删除旧文件失败，继续上传新版本:`, deleteError);
+        console.warn(`[FeiSync] 删除旧文件失败，继续上传新版本:`, deleteError);
       }
     } else {
       // 没有同步记录（新文件），但云端可能存在同名文件
@@ -360,11 +366,11 @@ export class SyncEngine {
           try {
             await this.apiClient.deleteFile(existingFile.token, existingFile.type);
           } catch (deleteError) {
-            console.warn(`[Flybook] 删除同名文件失败，继续上传:`, deleteError);
+            console.warn(`[FeiSync] 删除同名文件失败，继续上传:`, deleteError);
           }
         }
       } catch (error) {
-        console.warn(`[Flybook] 检查云端文件存在性失败，继续上传:`, error);
+        console.warn(`[FeiSync] 检查云端文件存在性失败，继续上传:`, error);
       }
     }
 
@@ -380,7 +386,7 @@ export class SyncEngine {
       fileSize
     );
 
-    console.log(`[Flybook] 文件上传成功，token: ${fileToken}`);
+    console.log(`[FeiSync] 文件上传成功，token: ${fileToken}`);
     return { fileToken, fileType: 'file' };
   }
 
@@ -396,10 +402,10 @@ export class SyncEngine {
       // 删除旧路径的云端文件
       try {
         await this.apiClient.deleteFile(oldRecord.cloudToken, oldRecord.cloudType);
-        console.log(`[Flybook] 重命名：已删除旧路径云端文件 ${oldPath}`);
+        console.log(`[FeiSync] 重命名：已删除旧路径云端文件 ${oldPath}`);
         this.addLog('delete', oldPath, `重命名为 ${newPath}，删除旧云端文件`);
       } catch (error) {
-        console.warn(`[Flybook] 删除旧路径云端文件失败:`, error);
+        console.warn(`[FeiSync] 删除旧路径云端文件失败:`, error);
       }
       // 移除旧记录
       delete syncRecords[oldPath];
@@ -424,10 +430,10 @@ export class SyncEngine {
     if (record) {
       try {
         await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
-        console.log(`[Flybook] 已删除云端文件: ${filePath}`);
+        console.log(`[FeiSync] 已删除云端文件: ${filePath}`);
         this.addLog('delete', filePath, `本地文件已删除，同步删除云端文件`);
       } catch (error) {
-        console.warn(`[Flybook] 删除云端文件失败:`, error);
+        console.warn(`[FeiSync] 删除云端文件失败:`, error);
         this.addLog('error', filePath, `删除云端文件失败: ${(error as Error).message}`);
       }
       delete syncRecords[filePath];
@@ -501,13 +507,13 @@ export class SyncEngine {
     try {
       files = await this.apiClient.listFolderContents(folderToken);
     } catch (error) {
-      console.warn(`[Flybook] 列出文件夹内容失败:`, error);
+      console.warn(`[FeiSync] 列出文件夹内容失败:`, error);
       return;
     }
 
-    console.log(`[Flybook][DEBUG] downloadFolder: folderToken=${folderToken}, 找到 ${files.length} 个项目`);
+    console.log(`[FeiSync][DEBUG] downloadFolder: folderToken=${folderToken}, 找到 ${files.length} 个项目`);
     for (const f of files) {
-      console.log(`[Flybook][DEBUG]   - ${f.name} (type=${f.type}, token=${f.token})`);
+      console.log(`[FeiSync][DEBUG]   - ${f.name} (type=${f.type}, token=${f.token})`);
     }
 
     for (const file of files) {
@@ -536,14 +542,14 @@ export class SyncEngine {
             const skipMsg = `跳过在线文档 ${file.name}（导出权限不足，请在插件设置中重新点击"授权"按钮获取新权限。确保飞书开发者后台已开通 drive:export:readonly 和 docs:document:export 权限）`;
             result.errors.push(skipMsg);
             this.addLog('error', `${localPath}/${file.name}`, skipMsg);
-            console.warn('[Flybook]', skipMsg);
+            console.warn('[FeiSync]', skipMsg);
             new Notice(`飞书导出权限不足，请重新授权`, 0);
           } else {
             result.failedCount++;
             const errorMsg = `下载文件 ${file.name} 失败: ${errMsg}`;
             result.errors.push(errorMsg);
             this.addLog('error', `${localPath}/${file.name}`, errMsg);
-            console.error('[Flybook]', errorMsg);
+            console.error('[FeiSync]', errorMsg);
           }
         }
       }
@@ -581,7 +587,7 @@ export class SyncEngine {
     const localName = this.getLocalFileName(remoteFile.name, remoteFile.type);
     const filePath = localPath ? `${localPath}/${localName}` : localName;
 
-    console.log(`[Flybook][DEBUG] downloadSingleFile: name=${remoteFile.name}, type=${remoteFile.type}, token=${remoteFile.token}, filePath=${filePath}`);
+    console.log(`[FeiSync][DEBUG] downloadSingleFile: name=${remoteFile.name}, type=${remoteFile.type}, token=${remoteFile.token}, filePath=${filePath}`);
 
     // 检查本地是否已有该文件
     const localFile = this.vault.getAbstractFileByPath(filePath);
@@ -603,7 +609,7 @@ export class SyncEngine {
       await this.vault.modifyBinary(localFile, remoteContent);
       result.downloadedCount++;
       this.addLog('download', filePath, '本地文件已更新（覆盖）');
-      console.log(`[Flybook] 文件已更新: ${filePath}`);
+      console.log(`[FeiSync] 文件已更新: ${filePath}`);
     } else {
       // 本地不存在，创建新文件
       const content = await this.apiClient.downloadFile(remoteFile.token, remoteFile.type);
@@ -624,7 +630,7 @@ export class SyncEngine {
       await this.vault.createBinary(filePath, new Uint8Array(content));
       result.downloadedCount++;
       this.addLog('download', filePath, '新文件已下载');
-      console.log(`[Flybook] 新文件已下载: ${filePath}`);
+      console.log(`[FeiSync] 新文件已下载: ${filePath}`);
     }
   }
 
@@ -635,7 +641,7 @@ export class SyncEngine {
     const files: TFile[] = [];
     const folder = this.vault.getFolderByPath(folderPath);
     if (!folder) {
-      console.warn('[Flybook] 本地文件夹不存在:', folderPath);
+      console.warn('[FeiSync] 本地文件夹不存在:', folderPath);
       return files;
     }
     this.collectFiles(folder, files);

@@ -1,13 +1,13 @@
-import FlybookPlugin from './main';
+import FeiSyncPlugin from './main';
 import { App, PluginSettingTab, Setting, Notice, TextComponent, AbstractInputSuggest, TFolder, Modal } from 'obsidian';
 
 /**
  * 同步日志查看弹窗
  */
 class SyncLogModal extends Modal {
-  private plugin: FlybookPlugin;
+  private plugin: FeiSyncPlugin;
 
-  constructor(app: App, plugin: FlybookPlugin) {
+  constructor(app: App, plugin: FeiSyncPlugin) {
     super(app);
     this.plugin = plugin;
   }
@@ -19,20 +19,20 @@ class SyncLogModal extends Modal {
 
     const logs = this.plugin.settings.syncLog || [];
     if (logs.length === 0) {
-      contentEl.createEl('p', { text: '暂无同步日志', cls: 'flybook-hint' });
+      contentEl.createEl('p', { text: '暂无同步日志', cls: 'feisync-hint' });
       return;
     }
 
     // 按时间倒序显示
     const sortedLogs = [...logs].reverse();
-    const container = contentEl.createEl('div', { cls: 'flybook-log-container' });
+    const container = contentEl.createEl('div', { cls: 'feisync-log-container' });
     container.style.maxHeight = '500px';
     container.style.overflowY = 'auto';
     container.style.fontFamily = 'monospace';
     container.style.fontSize = '12px';
 
     for (const entry of sortedLogs) {
-      const item = container.createEl('div', { cls: 'flybook-log-entry' });
+      const item = container.createEl('div', { cls: 'feisync-log-entry' });
       item.style.padding = '4px 8px';
       item.style.borderBottom = '1px solid var(--background-modifier-border)';
 
@@ -82,7 +82,7 @@ export interface SyncLogEntry {
 }
 
 // 设置接口
-export interface FlybookPluginSettings {
+export interface FeiSyncPluginSettings {
   appId: string;
   appSecret: string;
   localFolderPath: string;
@@ -96,10 +96,11 @@ export interface FlybookPluginSettings {
   maxConcurrentUploads: number; // 最大并发上传数
   maxRetryAttempts: number; // API 请求最大重试次数
   syncLog: SyncLogEntry[]; // 同步日志（持久化）
+  syncRecords: Record<string, import('./syncEngine').FileSyncRecord>; // 同步记录（持久化）
 }
 
 // 默认设置
-const DEFAULT_SETTINGS: FlybookPluginSettings = {
+const DEFAULT_SETTINGS: FeiSyncPluginSettings = {
   appId: '',
   appSecret: '',
   localFolderPath: '',
@@ -113,12 +114,13 @@ const DEFAULT_SETTINGS: FlybookPluginSettings = {
   maxConcurrentUploads: 3,
   maxRetryAttempts: 3,
   syncLog: [],
+  syncRecords: {},
 };
 
 /**
  * 加载默认设置
  */
-export function getDefaultSettings(): FlybookPluginSettings {
+export function getDefaultSettings(): FeiSyncPluginSettings {
   return Object.assign({}, DEFAULT_SETTINGS);
 }
 
@@ -198,7 +200,7 @@ class FolderSelectModal extends Modal {
       return a.path.localeCompare(b.path);
     });
 
-    const listEl = contentEl.createEl('div', { cls: 'flybook-folder-list' });
+    const listEl = contentEl.createEl('div', { cls: 'feisync-folder-list' });
     listEl.style.maxHeight = '400px';
     listEl.style.overflowY = 'auto';
     listEl.style.border = '1px solid var(--background-modifier-border)';
@@ -206,7 +208,7 @@ class FolderSelectModal extends Modal {
 
     for (const folder of allFolders) {
       const item = listEl.createEl('div', {
-        cls: 'flybook-folder-item',
+        cls: 'feisync-folder-item',
         text: folder.path || '/ (根目录)'
       });
       item.style.padding = '8px 12px';
@@ -233,10 +235,10 @@ class FolderSelectModal extends Modal {
 }
 
 // 设置选项卡类
-export class FlybookSettingTab extends PluginSettingTab {
-  plugin: FlybookPlugin;
+export class FeiSyncSettingTab extends PluginSettingTab {
+  plugin: FeiSyncPlugin;
 
-  constructor(app: App, plugin: FlybookPlugin) {
+  constructor(app: App, plugin: FeiSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -246,7 +248,7 @@ export class FlybookSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    containerEl.createEl('h2', { text: 'Obsidian Flybook 设置' });
+    containerEl.createEl('h2', { text: 'FeiSync 设置' });
 
     // 凭证配置
     new Setting(containerEl)
@@ -514,12 +516,12 @@ export class FlybookSettingTab extends PluginSettingTab {
       // 显示授权说明
       containerEl.createEl('p', {
         text: '要访问个人云空间，需要进行用户授权。授权后插件将获得访问你个人云空间的权限。',
-        cls: 'flybook-hint'
+        cls: 'feisync-hint'
       });
 
       containerEl.createEl('p', {
         text: '提示：请先在飞书开放平台 → 应用功能 → 网页应用 中，添加回调地址 http://localhost:9527/callback',
-        cls: 'flybook-hint'
+        cls: 'feisync-hint'
       });
 
       // 授权按钮
@@ -638,7 +640,7 @@ export class FlybookSettingTab extends PluginSettingTab {
       });
 
     // 同步日志
-    containerEl.createEl('h3', { text: '同步日志' });
+    containerEl.createEl('h3', { text: '同步日志与记录' });
 
     new Setting(containerEl)
       .setName('查看同步日志')
@@ -659,10 +661,25 @@ export class FlybookSettingTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName('清除同步记录')
+      .setDesc('清除所有文件的同步记录，下次同步时将重新上传所有文件（适用于云端文件被手动删除后需要重新上传的情况）')
+      .addButton((button) => {
+        const recordCount = Object.keys(this.plugin.settings.syncRecords || {}).length;
+        button.setButtonText(`清除同步记录 (${recordCount} 条)`)
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.settings.syncRecords = {};
+            await this.plugin.saveSettings();
+            new Notice('同步记录已清除，下次同步将重新上传所有文件');
+            this.display(); // 刷新显示
+          });
+      });
+
     // 提示信息
     containerEl.createEl('p', {
       text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive），用于上传文件到飞书云盘。',
-      cls: 'flybook-hint'
+      cls: 'feisync-hint'
     });
   }
 

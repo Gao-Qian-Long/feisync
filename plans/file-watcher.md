@@ -21,7 +21,7 @@ Obsidian 提供了 `Vault` 事件，可通过 `this.app.vault.on(event, callback
 
 ```typescript
 export class FileWatcher {
-  private plugin: FlybookPlugin;
+  private plugin: FeiSyncPlugin;
   private watchedPath: string = '';  // 监控的本地文件夹路径
   private isEnabled: boolean = false;
   private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -33,7 +33,7 @@ export class FileWatcher {
   private handleDelete = this.onFileDelete.bind(this);
   private handleRename = this.onFileRename.bind(this);
 
-  constructor(plugin: FlybookPlugin) {
+  constructor(plugin: FeiSyncPlugin) {
     this.plugin = plugin;
     this.vault = plugin.app.vault;
   }

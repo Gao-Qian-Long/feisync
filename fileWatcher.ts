@@ -5,10 +5,10 @@
  */
 
 import { Vault, TAbstractFile, TFolder, TFile } from 'obsidian';
-import FlybookPlugin from './main';
+import FeiSyncPlugin from './main';
 
 export class FileWatcher {
-  private plugin: FlybookPlugin;
+  private plugin: FeiSyncPlugin;
   private watchedPath: string = ''; // 配置的本地文件夹路径（相对仓库根目录）
   private isEnabled: boolean = false;
   private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -20,7 +20,7 @@ export class FileWatcher {
   private handleDelete = this.onFileDelete.bind(this);
   private handleRename = this.onFileRename.bind(this);
 
-  constructor(plugin: FlybookPlugin) {
+  constructor(plugin: FeiSyncPlugin) {
     this.plugin = plugin;
     this.vault = plugin.app.vault;
   }
@@ -41,7 +41,7 @@ export class FileWatcher {
    * 启动文件监控
    */
   private start(): void {
-    console.log('[Flybook] 启动文件监控，监控路径:', this.watchedPath);
+    console.log('[FeiSync] 启动文件监控，监控路径:', this.watchedPath);
 
     this.vault.on('create', this.handleCreate as (...args: unknown[]) => unknown);
     this.vault.on('modify', this.handleModify as (...args: unknown[]) => unknown);
@@ -53,7 +53,7 @@ export class FileWatcher {
    * 停止文件监控
    */
   stop(): void {
-    console.log('[Flybook] 停止文件监控');
+    console.log('[FeiSync] 停止文件监控');
 
     this.vault.off('create', this.handleCreate as (...args: unknown[]) => unknown);
     this.vault.off('modify', this.handleModify as (...args: unknown[]) => unknown);
@@ -111,11 +111,11 @@ export class FileWatcher {
     }
 
     if (file instanceof TFolder) {
-      console.log('[Flybook] 忽略文件夹创建事件:', file.path);
+      console.log('[FeiSync] 忽略文件夹创建事件:', file.path);
       return;
     }
 
-    console.log('[Flybook] 检测到新文件:', file.path);
+    console.log('[FeiSync] 检测到新文件:', file.path);
     this.scheduleSync('create', file.path);
   }
 
@@ -131,7 +131,7 @@ export class FileWatcher {
       return;
     }
 
-    console.log('[Flybook] 检测到文件修改:', file.path);
+    console.log('[FeiSync] 检测到文件修改:', file.path);
     this.scheduleSync('modify', file.path);
   }
 
@@ -145,16 +145,16 @@ export class FileWatcher {
     }
 
     if (file instanceof TFolder) {
-      console.log('[Flybook] 忽略文件夹删除事件:', file.path);
+      console.log('[FeiSync] 忽略文件夹删除事件:', file.path);
       return;
     }
 
-    console.log('[Flybook] 检测到文件删除:', file.path);
+    console.log('[FeiSync] 检测到文件删除:', file.path);
 
     // 删除事件不需要防抖，直接处理
     if (this.plugin.syncEngine) {
       this.plugin.syncEngine.handleDelete(file.path).catch(error => {
-        console.error('[Flybook] 处理文件删除失败:', error);
+        console.error('[FeiSync] 处理文件删除失败:', error);
       });
     }
   }
@@ -168,32 +168,32 @@ export class FileWatcher {
     const newInWatched = this.isInWatchedPath(file);
 
     if (file instanceof TFolder) {
-      console.log('[Flybook] 忽略文件夹重命名事件:', oldPath, '->', file.path);
+      console.log('[FeiSync] 忽略文件夹重命名事件:', oldPath, '->', file.path);
       return;
     }
 
     if (oldInWatched && newInWatched) {
       // 在监控范围内重命名：删除旧云端文件，新文件等待同步上传
-      console.log('[Flybook] 检测到文件重命名:', oldPath, '->', file.path);
+      console.log('[FeiSync] 检测到文件重命名:', oldPath, '->', file.path);
       if (this.plugin.syncEngine) {
         this.plugin.syncEngine.handleRename(oldPath, file.path).then(() => {
           // 重命名处理完成后，触发一次同步以上传新路径的文件
           this.scheduleSync('rename', file.path);
         }).catch(error => {
-          console.error('[Flybook] 处理文件重命名失败:', error);
+          console.error('[FeiSync] 处理文件重命名失败:', error);
         });
       }
     } else if (oldInWatched && !newInWatched) {
       // 从监控范围内移出：删除云端文件
-      console.log('[Flybook] 文件移出监控范围:', oldPath, '->', file.path);
+      console.log('[FeiSync] 文件移出监控范围:', oldPath, '->', file.path);
       if (this.plugin.syncEngine) {
         this.plugin.syncEngine.handleDelete(oldPath).catch(error => {
-          console.error('[Flybook] 处理文件移出失败:', error);
+          console.error('[FeiSync] 处理文件移出失败:', error);
         });
       }
     } else if (!oldInWatched && newInWatched) {
       // 移入监控范围：视为新文件
-      console.log('[Flybook] 文件移入监控范围:', oldPath, '->', file.path);
+      console.log('[FeiSync] 文件移入监控范围:', oldPath, '->', file.path);
       this.scheduleSync('rename', file.path);
     }
     // 两者都不在监控范围，忽略
@@ -216,12 +216,12 @@ export class FileWatcher {
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(key);
-      console.log('[Flybook] 防抖结束，触发同步（操作:', action, '路径:', paths.join(' -> '), ')');
+      console.log('[FeiSync] 防抖结束，触发同步（操作:', action, '路径:', paths.join(' -> '), ')');
 
       try {
         await this.plugin.sync();
       } catch (error) {
-        console.error('[Flybook] 自动同步失败:', error);
+        console.error('[FeiSync] 自动同步失败:', error);
       }
     }, delayMs);
 

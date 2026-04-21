@@ -333,4 +333,4 @@ curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/interna
 
 ## 十一、后续步骤
 
-代理服务器搭建完成后，需要在 Obsidian Flybook 插件设置中配置代理地址。请使用服务器的 IPv6 地址（用于 Obsidian 访问）和确保 IPv4 地址已添加到飞书白名单（用于飞书 API 通信）。
+代理服务器搭建完成后，需要在 FeiSync 插件设置中配置代理地址。请使用服务器的 IPv6 地址（用于 Obsidian 访问）和确保 IPv4 地址已添加到飞书白名单（用于飞书 API 通信）。

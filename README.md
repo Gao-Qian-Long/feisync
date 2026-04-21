@@ -1,4 +1,4 @@
-# Obsidian Flybook
+# FeiSync
 
 一个 Obsidian 插件，用于将本地笔记同步到飞书（Feishu/Lark）Drive。
 
@@ -24,7 +24,7 @@
 ### 安装步骤
 
 1. 将插件文件夹复制到 Obsidian 仓库的 `.obsidian/plugins/` 目录下
-2. 重启 Obsidian，进入「设置」→「社区插件」，找到 "Obsidian Flybook" 并启用
+2. 重启 Obsidian，进入「设置」→「社区插件」，找到 "FeiSync" 并启用
 
 ---
 
@@ -198,7 +198,7 @@ curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/interna
 
 ### 第六步：配置插件
 
-1. 在 Obsidian 中打开「设置」→「Obsidian Flybook」
+1. 在 Obsidian 中打开「设置」→「FeiSync」
 2. **飞书 App ID**：填入第一步获取的 App ID
 3. **飞书 App Secret**：填入第一步获取的 App Secret
 4. **代理服务器地址**：填入代理服务器地址，格式为 `http://服务器IP:8080`
@@ -228,7 +228,7 @@ curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/interna
 
 ### 手动同步
 
-- **命令面板**：按 `Ctrl/Cmd + P`，输入 "Flybook: Sync now"，回车执行
+- **命令面板**：按 `Ctrl/Cmd + P`，输入 "FeiSync: Sync now"，回车执行
 - **Ribbon 图标**：点击左侧栏的云上传图标，选择「立即同步」
 
 ### 自动同步
@@ -239,7 +239,7 @@ curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/interna
 
 ### 查看日志
 
-打开 Obsidian 开发者工具（`Ctrl+Shift+I`），在控制台中查看 `[Flybook]` 前缀的日志。
+打开 Obsidian 开发者工具（`Ctrl+Shift+I`），在控制台中查看 `[FeiSync]` 前缀的日志。
 
 ---
 

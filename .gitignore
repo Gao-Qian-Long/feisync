@@ -25,7 +25,7 @@ Thumbs.db
 # 日志文件
 *.log
 npm-debug.log*
-
+.roo/
 # 临时文件
 *.tmp
 *.temp

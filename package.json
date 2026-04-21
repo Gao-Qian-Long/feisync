@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-flybook",
+  "name": "feisync",
   "version": "0.1.0",
   "description": "Sync your Obsidian notes to Feishu (Lark) Drive",
   "main": "main.js",
@@ -14,7 +14,7 @@
     "lark",
     "sync"
   ],
-  "author": "Obsidian Flybook Contributors",
+  "author": "FeiSync Contributors",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^16.18.126",

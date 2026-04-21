@@ -50,7 +50,7 @@ class RateLimiter {
       const oldestInWindow = this.timestamps[0];
       const waitTime = this.windowMs - (now - oldestInWindow) + 10; // 额外10ms缓冲
       if (waitTime > 0) {
-        console.log(`[Flybook] 速率限制：等待 ${waitTime}ms`);
+        console.log(`[FeiSync] 速率限制：等待 ${waitTime}ms`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
       // 递归重试
@@ -78,16 +78,16 @@ async function withRetry<T>(
       lastError = error as Error;
       const msg = lastError.message || '';
 
-      // 不重试的错误：认证错误、权限错误、参数错误
-      const noRetryPatterns = ['HTTP 4', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
+      // 不重试的错误：认证错误、权限错误、参数错误、文件已删除
+      const noRetryPatterns = ['1061007', 'file has been delete', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
       const shouldNotRetry = noRetryPatterns.some(p => msg.toLowerCase().includes(p.toLowerCase()));
-      if (shouldNotRetry && attempt > 0) {
+      if (shouldNotRetry) {
         break;
       }
 
       if (attempt < maxRetries) {
         const delay = 1000 * Math.pow(2, attempt); // 指数退避：1s, 2s, 4s
-        console.warn(`[Flybook] ${description}失败 (尝试 ${attempt + 1}/${maxRetries + 1})，${delay}ms 后重试:`, msg);
+        console.warn(`[FeiSync] ${description}失败 (尝试 ${attempt + 1}/${maxRetries + 1})，${delay}ms 后重试:`, msg);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -154,7 +154,7 @@ export class FeishuApiClient {
           // 下载等操作必须使用 user_access_token，不能回退
           throw new Error('此操作需要用户授权，请在设置中重新进行飞书 OAuth 授权');
         }
-        console.warn('[Flybook] 获取 user_access_token 失败，回退到 tenant_access_token:', error);
+        console.warn('[FeiSync] 获取 user_access_token 失败，回退到 tenant_access_token:', error);
         token = await this.authManager.getAccessToken();
       }
     } else {
@@ -197,10 +197,10 @@ export class FeishuApiClient {
         try {
           const errorData = JSON.parse(responseText);
           errorMsg = `HTTP ${response.status}: ${JSON.stringify(errorData)}`;
-          console.error('[Flybook] API 错误详情:', errorData);
+          console.error('[FeiSync] API 错误详情:', errorData);
         } catch {
           errorMsg = `HTTP ${response.status}: ${responseText.substring(0, 500)}`;
-          console.error('[Flybook] API 错误原始响应:', responseText);
+          console.error('[FeiSync] API 错误原始响应:', responseText);
         }
         throw new Error(errorMsg);
       }
@@ -270,7 +270,7 @@ export class FeishuApiClient {
       const files = await this.listFolderContents(parentToken);
       return files.find(f => f.name === folderName && f.type === 'folder') || null;
     } catch (error) {
-      console.error('[Flybook] 查找文件夹失败:', error);
+      console.error('[FeiSync] 查找文件夹失败:', error);
       return null;
     }
   }
@@ -326,7 +326,7 @@ export class FeishuApiClient {
 
       return allFiles;
     } catch (error) {
-      console.error('[Flybook] 列出文件夹内容失败:', error);
+      console.error('[FeiSync] 列出文件夹内容失败:', error);
       throw error;
     }
   }
@@ -360,7 +360,7 @@ export class FeishuApiClient {
 
       return data.data?.file_token || '';
     } catch (error) {
-      console.error('[Flybook] 创建文件夹失败:', error);
+      console.error('[FeiSync] 创建文件夹失败:', error);
       throw error;
     }
   }
@@ -439,7 +439,7 @@ export class FeishuApiClient {
 
       return data.data?.file_token || '';
     } catch (error) {
-      console.error('[Flybook] 上传文件失败:', error);
+      console.error('[FeiSync] 上传文件失败:', error);
       throw error;
     }
   }
@@ -470,7 +470,7 @@ export class FeishuApiClient {
         block_size: CHUNK_SIZE,
       };
 
-      console.log(`[Flybook] 分片上传预请求: ${fileName}, 大小: ${(size / 1024 / 1024).toFixed(2)}MB`);
+      console.log(`[FeiSync] 分片上传预请求: ${fileName}, 大小: ${(size / 1024 / 1024).toFixed(2)}MB`);
 
       const preUploadData = await this.apiRequest(
         this.getApiUrl('/open-apis/drive/v1/medias/upload_prepare'),
@@ -494,7 +494,7 @@ export class FeishuApiClient {
         throw new Error('分片预上传成功但未返回 upload_id');
       }
 
-      console.log(`[Flybook] 分片上传会话已创建，upload_id: ${uploadId}, 分片数: ${blockNums}`);
+      console.log(`[FeiSync] 分片上传会话已创建，upload_id: ${uploadId}, 分片数: ${blockNums}`);
 
       // 步骤2：逐片上传
       const uint8Content = fileContent instanceof Uint8Array ? fileContent : new Uint8Array(fileContent);
@@ -531,7 +531,7 @@ export class FeishuApiClient {
         }
 
         blockSeqList.push(i);
-        console.log(`[Flybook] 分片 ${i + 1}/${blockNums} 上传完成`);
+        console.log(`[FeiSync] 分片 ${i + 1}/${blockNums} 上传完成`);
       }
 
       // 步骤3：完成上传
@@ -558,10 +558,10 @@ export class FeishuApiClient {
       }
 
       const fileToken = completeData.data?.file_token || '';
-      console.log(`[Flybook] 分片上传完成，file_token: ${fileToken}`);
+      console.log(`[FeiSync] 分片上传完成，file_token: ${fileToken}`);
       return fileToken;
     } catch (error) {
-      console.error('[Flybook] 分片上传失败:', error);
+      console.error('[FeiSync] 分片上传失败:', error);
       throw error;
     }
   }
@@ -585,11 +585,11 @@ export class FeishuApiClient {
       throw new Error('文件 token 不能为空');
     }
 
-    console.log(`[Flybook][DEBUG] downloadFile 开始: token=${fileToken}, type=${fileType}`);
+    console.log(`[FeiSync][DEBUG] downloadFile 开始: token=${fileToken}, type=${fileType}`);
 
     // 在线文档需要先导出再下载
     if (['docx', 'sheet', 'bitable', 'doc', 'slides'].includes(fileType)) {
-      console.log(`[Flybook][DEBUG] 检测到在线文档类型 ${fileType}，使用导出流程`);
+      console.log(`[FeiSync][DEBUG] 检测到在线文档类型 ${fileType}，使用导出流程`);
       return this.exportAndDownload(fileToken, fileType);
     }
 
@@ -598,34 +598,34 @@ export class FeishuApiClient {
 
     // 策略1: /files/{token}/download（适用于云空间原生文件）
     try {
-      console.log(`[Flybook][DEBUG] 尝试 /files/ 端点下载...`);
+      console.log(`[FeiSync][DEBUG] 尝试 /files/ 端点下载...`);
       const result = await this.downloadWithRetry(
         `/open-apis/drive/v1/files/${fileToken}/download`,
         'files'
       );
-      console.log(`[Flybook][DEBUG] /files/ 端点下载成功，大小: ${result.byteLength} bytes`);
+      console.log(`[FeiSync][DEBUG] /files/ 端点下载成功，大小: ${result.byteLength} bytes`);
       return result;
     } catch (filesError) {
       lastError = filesError as Error;
-      console.warn(`[Flybook][DEBUG] /files/ 端点失败: ${lastError.message}`);
+      console.warn(`[FeiSync][DEBUG] /files/ 端点失败: ${lastError.message}`);
     }
 
     // 策略2: /medias/{token}/download（适用于素材文件）
     try {
-      console.log(`[Flybook][DEBUG] 尝试 /medias/ 端点下载...`);
+      console.log(`[FeiSync][DEBUG] 尝试 /medias/ 端点下载...`);
       const result = await this.downloadWithRetry(
         `/open-apis/drive/v1/medias/${fileToken}/download?file_type=${fileType}`,
         'medias'
       );
-      console.log(`[Flybook][DEBUG] /medias/ 端点下载成功，大小: ${result.byteLength} bytes`);
+      console.log(`[FeiSync][DEBUG] /medias/ 端点下载成功，大小: ${result.byteLength} bytes`);
       return result;
     } catch (mediasError) {
       const mediasErr = mediasError as Error;
-      console.warn(`[Flybook][DEBUG] /medias/ 端点也失败: ${mediasErr.message}`);
+      console.warn(`[FeiSync][DEBUG] /medias/ 端点也失败: ${mediasErr.message}`);
     }
 
     const errorMsg = `下载文件失败（/files/ 和 /medias/ 端点均失败）: /files/ 错误: ${lastError?.message}`;
-    console.error('[Flybook]', errorMsg);
+    console.error('[FeiSync]', errorMsg);
     throw new Error(errorMsg);
   }
 
@@ -647,7 +647,7 @@ export class FeishuApiClient {
         const timeoutId = setTimeout(() => controller.abort(), 120000);
 
         const endpoint = this.getApiUrl(apiPath);
-        console.log(`[Flybook][DEBUG] 下载请求: ${endpoint} (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})`);
+        console.log(`[FeiSync][DEBUG] 下载请求: ${endpoint} (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})`);
 
         const response = await fetch(endpoint, {
           method: 'GET',
@@ -657,14 +657,14 @@ export class FeishuApiClient {
 
         clearTimeout(timeoutId);
 
-        console.log(`[Flybook][DEBUG] 响应状态: ${response.status} ${response.statusText}`);
-        console.log(`[Flybook][DEBUG] 响应 Content-Type: ${response.headers.get('content-type')}`);
+        console.log(`[FeiSync][DEBUG] 响应状态: ${response.status} ${response.statusText}`);
+        console.log(`[FeiSync][DEBUG] 响应 Content-Type: ${response.headers.get('content-type')}`);
 
         if (!response.ok) {
           let errorMsg = `HTTP ${response.status}`;
           try {
             const errorText = await response.text();
-            console.log(`[Flybook][DEBUG] 错误响应内容: ${errorText.substring(0, 500)}`);
+            console.log(`[FeiSync][DEBUG] 错误响应内容: ${errorText.substring(0, 500)}`);
             const errorData = JSON.parse(errorText);
             errorMsg = `HTTP ${response.status}: ${errorData.msg || JSON.stringify(errorData)}`;
           } catch {
@@ -674,7 +674,7 @@ export class FeishuApiClient {
         }
 
         const contentLength = response.headers.get('content-length');
-        console.log(`[Flybook][DEBUG] Content-Length: ${contentLength || 'unknown'}`);
+        console.log(`[FeiSync][DEBUG] Content-Length: ${contentLength || 'unknown'}`);
 
         return await response.arrayBuffer();
       } catch (error) {
@@ -683,13 +683,13 @@ export class FeishuApiClient {
 
         // 不重试 4xx 错误（除了 429 限流）
         if (msg.includes('HTTP 4') && !msg.includes('HTTP 429')) {
-          console.warn(`[Flybook][DEBUG] ${endpointName} 端点 ${msg}，不再重试`);
+          console.warn(`[FeiSync][DEBUG] ${endpointName} 端点 ${msg}，不再重试`);
           break;
         }
 
         if (attempt < this.maxRetryAttempts) {
           const delay = 1000 * Math.pow(2, attempt);
-          console.warn(`[Flybook][DEBUG] ${endpointName} 端点下载失败 (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})，${delay}ms 后重试:`, msg);
+          console.warn(`[FeiSync][DEBUG] ${endpointName} 端点下载失败 (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})，${delay}ms 后重试:`, msg);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
@@ -713,7 +713,7 @@ export class FeishuApiClient {
     };
     const exportType = exportTypeMap[fileType] || 'docx';
 
-    console.log(`[Flybook][DEBUG] 创建导出任务: token=${fileToken}, type=${fileType}, exportType=${exportType}`);
+    console.log(`[FeiSync][DEBUG] 创建导出任务: token=${fileToken}, type=${fileType}, exportType=${exportType}`);
 
     // 步骤1: 创建导出任务
     const headers = await this.getHeaders(true); // 导出必须使用 user_access_token
@@ -756,7 +756,7 @@ export class FeishuApiClient {
       throw new Error('创建导出任务成功但未返回 ticket');
     }
 
-    console.log(`[Flybook][DEBUG] 导出任务已创建，ticket: ${ticket}`);
+    console.log(`[FeiSync][DEBUG] 导出任务已创建，ticket: ${ticket}`);
 
     // 步骤2: 轮询导出任务
     let exportFileToken: string | null = null;
@@ -782,7 +782,7 @@ export class FeishuApiClient {
         exportFileToken = result.file_token;
         break;
       } else if (result.job_status === 1 || result.job_status === 2) {
-        console.log(`[Flybook][DEBUG] 导出任务进行中 (status: ${result.job_status})...`);
+        console.log(`[FeiSync][DEBUG] 导出任务进行中 (status: ${result.job_status})...`);
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       } else {
@@ -794,7 +794,7 @@ export class FeishuApiClient {
       throw new Error('导出任务超时');
     }
 
-    console.log(`[Flybook][DEBUG] 导出完成，file_token: ${exportFileToken}`);
+    console.log(`[FeiSync][DEBUG] 导出完成，file_token: ${exportFileToken}`);
 
     // 步骤3: 下载导出文件
     return this.downloadWithRetry(
@@ -807,6 +807,7 @@ export class FeishuApiClient {
 
   /**
    * 删除文件
+   * 如果文件已不存在（错误码 1061007），视为删除成功
    */
   async deleteFile(fileToken: string, fileType: string = 'file'): Promise<void> {
     if (!fileToken || fileToken.trim() === '') {
@@ -823,12 +824,23 @@ export class FeishuApiClient {
       }, REQUEST_TIMEOUT, `删除文件 ${fileToken}`);
 
       if (data.code !== 0) {
+        // 错误码 1061007 表示文件已被删除，视为成功
+        if (data.code === 1061007) {
+          console.log(`[FeiSync] 文件已不存在（已被删除），视为删除成功`);
+          return;
+        }
         throw new Error(`删除文件失败: ${data.msg}`);
       }
 
-      console.log(`[Flybook] 文件删除成功`);
+      console.log(`[FeiSync] 文件删除成功`);
     } catch (error) {
-      console.error('[Flybook] 删除文件失败:', error);
+      // 捕获 HTTP 404 且包含 "file has been delete" 的情况，也视为成功
+      const errMsg = (error as Error).message || '';
+      if (errMsg.includes('1061007') || errMsg.includes('file has been delete')) {
+        console.log(`[FeiSync] 文件已不存在（已被删除），视为删除成功`);
+        return;
+      }
+      console.error('[FeiSync] 删除文件失败:', error);
       throw error;
     }
   }
@@ -847,8 +859,23 @@ export class FeishuApiClient {
         (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
       ) || null;
     } catch (error) {
-      console.error('[Flybook] 查找文件失败:', error);
+      console.error('[FeiSync] 查找文件失败:', error);
       return null;
+    }
+  }
+
+  /**
+   * 检查云端文件是否仍然存在
+   * 通过在父文件夹中查找同名文件来验证
+   */
+  async checkFileExists(fileToken: string, parentFolderToken: string): Promise<boolean> {
+    try {
+      const files = await this.listFolderContents(parentFolderToken);
+      return files.some(f => f.token === fileToken);
+    } catch (error) {
+      // 如果连父文件夹都访问失败，保守地认为文件可能已不存在
+      console.warn('[FeiSync] 检查文件存在性失败:', error);
+      return false;
     }
   }
 
@@ -951,7 +978,7 @@ export class FeishuApiClient {
       const docToken = await this.pollImportTask(ticket);
       return docToken;
     } catch (error) {
-      console.error('[Flybook] 导入文件失败:', error);
+      console.error('[FeiSync] 导入文件失败:', error);
       throw error;
     }
   }
@@ -1082,7 +1109,7 @@ export class FeishuApiClient {
         throw new Error(`移动文件失败: ${data.msg}`);
       }
     } catch (error) {
-      console.error('[Flybook] 移动文件失败:', error);
+      console.error('[FeiSync] 移动文件失败:', error);
       throw error;
     }
   }

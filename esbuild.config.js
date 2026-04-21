@@ -3,7 +3,7 @@ const esbuild = require("esbuild");
 const watch = process.argv.includes("--watch");
 
 const plugin = {
-  name: "obsidian-flybook",
+  name: "feisync",
   version: "0.1.0",
 };
 

@@ -1,19 +1,19 @@
 /**
- * Obsidian Flybook 插件主入口
+ * FeiSync 插件主入口
  * 将本地 Obsidian 笔记同步到飞书 Drive
  */
 
 import { Plugin, Notice, Menu } from 'obsidian';
-import { FlybookPluginSettings, FlybookSettingTab, getDefaultSettings } from './settings';
+import { FeiSyncPluginSettings, FeiSyncSettingTab, getDefaultSettings } from './settings';
 import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
 import { FileWatcher } from './fileWatcher';
 import { SyncEngine, FileSyncRecord } from './syncEngine';
 
 // 插件主类
-export default class FlybookPlugin extends Plugin {
+export default class FeiSyncPlugin extends Plugin {
   // 设置
-  settings: FlybookPluginSettings = getDefaultSettings();
+  settings: FeiSyncPluginSettings = getDefaultSettings();
 
   // 模块实例
   authManager: FeishuAuthManager | null = null;
@@ -22,7 +22,7 @@ export default class FlybookPlugin extends Plugin {
   syncEngine: SyncEngine | null = null;
 
   // 设置选项卡
-  settingTab: FlybookSettingTab | null = null;
+  settingTab: FeiSyncSettingTab | null = null;
 
   // Ribbon 图标元素
   ribbonIconEl: HTMLElement | null = null;
@@ -40,7 +40,7 @@ export default class FlybookPlugin extends Plugin {
    * 插件加载时调用
    */
   async onload(): Promise<void> {
-    console.log('[Flybook] 插件加载中...');
+    console.log('[FeiSync] 插件加载中...');
 
     // 1. 加载设置
     await this.loadSettings();
@@ -49,7 +49,7 @@ export default class FlybookPlugin extends Plugin {
     await this.initializeModules();
 
     // 3. 注册设置界面
-    this.settingTab = new FlybookSettingTab(this.app, this);
+    this.settingTab = new FeiSyncSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
 
     // 4. 注册命令
@@ -71,14 +71,14 @@ export default class FlybookPlugin extends Plugin {
       this.toggleScheduledSync(true);
     }
 
-    console.log('[Flybook] 插件加载完成');
+    console.log('[FeiSync] 插件加载完成');
   }
 
   /**
    * 插件卸载时调用
    */
   async onunload(): Promise<void> {
-    console.log('[Flybook] 插件卸载中...');
+    console.log('[FeiSync] 插件卸载中...');
 
     // 停止文件监控
     if (this.fileWatcher) {
@@ -93,7 +93,7 @@ export default class FlybookPlugin extends Plugin {
       this.ribbonIconEl.remove();
     }
 
-    console.log('[Flybook] 插件卸载完成');
+    console.log('[FeiSync] 插件卸载完成');
   }
 
   /**
@@ -107,9 +107,22 @@ export default class FlybookPlugin extends Plugin {
       if (!Array.isArray(this.settings.syncLog)) {
         this.settings.syncLog = [];
       }
-      console.log('[Flybook] 设置加载成功');
+      // 确保 syncRecords 是对象
+      if (!this.settings.syncRecords || typeof this.settings.syncRecords !== 'object') {
+        this.settings.syncRecords = {};
+      }
+      // 兼容旧版本：如果 data 中有 feisyncSyncRecords 但 settings.syncRecords 为空，迁移数据
+      if (loadedData && loadedData.feisyncSyncRecords && Object.keys(this.settings.syncRecords).length === 0) {
+        const oldRecords = typeof loadedData.feisyncSyncRecords === 'string'
+          ? JSON.parse(loadedData.feisyncSyncRecords)
+          : loadedData.feisyncSyncRecords;
+        if (oldRecords && typeof oldRecords === 'object') {
+          this.settings.syncRecords = oldRecords;
+        }
+      }
+      console.log('[FeiSync] 设置加载成功');
     } catch (error) {
-      console.error('[Flybook] 加载设置失败:', error);
+      console.error('[FeiSync] 加载设置失败:', error);
       this.settings = getDefaultSettings();
     }
   }
@@ -120,7 +133,7 @@ export default class FlybookPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     try {
       await this.saveData(this.settings);
-      console.log('[Flybook] 设置保存成功');
+      console.log('[FeiSync] 设置保存成功');
 
       // 如果认证信息变更，更新或创建 authManager
       if (this.settings.appId && this.settings.appSecret) {
@@ -147,7 +160,7 @@ export default class FlybookPlugin extends Plugin {
         this.fileWatcher.updateConfig(this.settings.localFolderPath, this.settings.autoSyncOnChange);
       }
     } catch (error) {
-      console.error('[Flybook] 保存设置失败:', error);
+      console.error('[FeiSync] 保存设置失败:', error);
       new Notice('保存设置失败');
     }
   }
@@ -194,7 +207,7 @@ export default class FlybookPlugin extends Plugin {
         }
       }
     } catch (error) {
-      console.error('[Flybook] 加载用户令牌失败:', error);
+      console.error('[FeiSync] 加载用户令牌失败:', error);
     }
   }
 
@@ -207,43 +220,35 @@ export default class FlybookPlugin extends Plugin {
         const data = await this.loadData();
         data.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
         await this.saveData(data);
-        console.log('[Flybook] 用户令牌已保存');
+        console.log('[FeiSync] 用户令牌已保存');
       } catch (error) {
-        console.error('[Flybook] 保存用户令牌失败:', error);
+        console.error('[FeiSync] 保存用户令牌失败:', error);
       }
     }
   }
 
   /**
-   * 加载同步记录
+   * 加载同步记录（从 settings 对象中读取）
    */
   async loadSyncRecords(): Promise<Record<string, FileSyncRecord>> {
-    try {
-      const data = await this.loadData();
-      if (data && data.flybookSyncRecords) {
-        const records = typeof data.flybookSyncRecords === 'string'
-          ? JSON.parse(data.flybookSyncRecords)
-          : data.flybookSyncRecords;
-        console.log(`[Flybook] 已加载 ${Object.keys(records).length} 条同步记录`);
-        return records;
-      }
-    } catch (error) {
-      console.error('[Flybook] 加载同步记录失败:', error);
+    if (!this.settings.syncRecords || typeof this.settings.syncRecords !== 'object') {
+      this.settings.syncRecords = {};
     }
-    return {};
+    const records = this.settings.syncRecords;
+    console.log(`[FeiSync] 已加载 ${Object.keys(records).length} 条同步记录`);
+    return records;
   }
 
   /**
-   * 保存同步记录
+   * 保存同步记录（写入 settings 对象，随 saveSettings 持久化）
    */
   async saveSyncRecords(records: Record<string, FileSyncRecord>): Promise<void> {
     try {
-      const data = await this.loadData();
-      data.flybookSyncRecords = records;
-      await this.saveData(data);
-      console.log(`[Flybook] 已保存 ${Object.keys(records).length} 条同步记录`);
+      this.settings.syncRecords = records;
+      await this.saveData(this.settings);
+      console.log(`[FeiSync] 已保存 ${Object.keys(records).length} 条同步记录`);
     } catch (error) {
-      console.error('[Flybook] 保存同步记录失败:', error);
+      console.error('[FeiSync] 保存同步记录失败:', error);
     }
   }
 
@@ -253,7 +258,7 @@ export default class FlybookPlugin extends Plugin {
   private registerCommands(): void {
     // 手动同步命令
     this.addCommand({
-      id: 'flybook-sync',
+      id: 'feisync-sync',
       name: 'Sync now',
       callback: async () => {
         await this.sync();
@@ -262,7 +267,7 @@ export default class FlybookPlugin extends Plugin {
 
     // 从飞书下载命令
     this.addCommand({
-      id: 'flybook-download',
+      id: 'feisync-download',
       name: 'Download from Feishu',
       callback: async () => {
         await this.downloadFromFeishu();
@@ -271,7 +276,7 @@ export default class FlybookPlugin extends Plugin {
 
     // 查看同步日志
     this.addCommand({
-      id: 'flybook-log',
+      id: 'feisync-log',
       name: 'View sync log',
       callback: () => {
         // 打开设置页面
@@ -324,8 +329,8 @@ export default class FlybookPlugin extends Plugin {
    */
   updateStatusBar(text: string, icon?: string): void {
     if (!this.statusBarItemEl) return;
-    this.statusBarItemEl.setText(`Flybook: ${text}`);
-    this.statusBarItemEl.title = `Obsidian Flybook - ${text}`;
+    this.statusBarItemEl.setText(`FeiSync: ${text}`);
+    this.statusBarItemEl.title = `FeiSync - ${text}`;
   }
 
   /**
@@ -410,9 +415,9 @@ export default class FlybookPlugin extends Plugin {
     this.updateStatusBar('同步中...');
 
     try {
-      console.log('[Flybook] 开始同步...');
+      console.log('[FeiSync] 开始同步...');
       await this.syncEngine.sync();
-      console.log('[Flybook] 同步流程结束');
+      console.log('[FeiSync] 同步流程结束');
       this.updateStatusBar('同步完成');
     } catch (error) {
       this.updateStatusBar('同步失败');
@@ -484,7 +489,7 @@ export default class FlybookPlugin extends Plugin {
    */
   toggleFileWatcher(enable: boolean): void {
     if (!this.fileWatcher) {
-      console.warn('[Flybook] 文件监控器未初始化');
+      console.warn('[FeiSync] 文件监控器未初始化');
       return;
     }
 
@@ -507,18 +512,18 @@ export default class FlybookPlugin extends Plugin {
 
     if (enable && this.settings.scheduledSyncInterval > 0) {
       const intervalMs = this.settings.scheduledSyncInterval * 60 * 1000;
-      console.log(`[Flybook] 启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
+      console.log(`[FeiSync] 启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
 
       this.scheduledSyncTimer = setInterval(async () => {
         try {
-          console.log('[Flybook] 定时同步触发');
+          console.log('[FeiSync] 定时同步触发');
           await this.sync();
         } catch (error) {
-          console.error('[Flybook] 定时同步失败:', error);
+          console.error('[FeiSync] 定时同步失败:', error);
         }
       }, intervalMs);
     } else {
-      console.log('[Flybook] 定时同步已停止');
+      console.log('[FeiSync] 定时同步已停止');
     }
   }
 }
