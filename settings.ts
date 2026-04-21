@@ -1,6 +1,86 @@
 import FlybookPlugin from './main';
 import { App, PluginSettingTab, Setting, Notice, TextComponent, AbstractInputSuggest, TFolder, Modal } from 'obsidian';
 
+/**
+ * 同步日志查看弹窗
+ */
+class SyncLogModal extends Modal {
+  private plugin: FlybookPlugin;
+
+  constructor(app: App, plugin: FlybookPlugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText('同步日志');
+
+    const logs = this.plugin.settings.syncLog || [];
+    if (logs.length === 0) {
+      contentEl.createEl('p', { text: '暂无同步日志', cls: 'flybook-hint' });
+      return;
+    }
+
+    // 按时间倒序显示
+    const sortedLogs = [...logs].reverse();
+    const container = contentEl.createEl('div', { cls: 'flybook-log-container' });
+    container.style.maxHeight = '500px';
+    container.style.overflowY = 'auto';
+    container.style.fontFamily = 'monospace';
+    container.style.fontSize = '12px';
+
+    for (const entry of sortedLogs) {
+      const item = container.createEl('div', { cls: 'flybook-log-entry' });
+      item.style.padding = '4px 8px';
+      item.style.borderBottom = '1px solid var(--background-modifier-border)';
+
+      const time = new Date(entry.timestamp).toLocaleString();
+      const actionColors: Record<string, string> = {
+        upload: '#4caf50',
+        skip: '#9e9e9e',
+        delete: '#f44336',
+        download: '#2196f3',
+        error: '#ff5722',
+        info: '#607d8b',
+      };
+      const color = actionColors[entry.action] || '#607d8b';
+
+      const timeSpan = item.createEl('span', { text: time });
+      timeSpan.style.color = 'var(--text-muted)';
+      timeSpan.style.marginRight = '8px';
+
+      const actionSpan = item.createEl('span', { text: `[${entry.action.toUpperCase()}]` });
+      actionSpan.style.color = color;
+      actionSpan.style.marginRight = '8px';
+      actionSpan.style.fontWeight = 'bold';
+
+      if (entry.filePath) {
+        const fileSpan = item.createEl('span', { text: entry.filePath });
+        fileSpan.style.marginRight = '8px';
+      }
+
+      if (entry.message) {
+        const msgSpan = item.createEl('span', { text: entry.message });
+        msgSpan.style.color = entry.action === 'error' ? '#ff5722' : 'var(--text-muted)';
+      }
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+// 同步日志条目
+export interface SyncLogEntry {
+  timestamp: number;
+  action: 'upload' | 'skip' | 'delete' | 'download' | 'error' | 'info';
+  filePath: string;
+  message: string;
+}
+
 // 设置接口
 export interface FlybookPluginSettings {
   appId: string;
@@ -10,6 +90,12 @@ export interface FlybookPluginSettings {
   autoSyncOnChange: boolean;
   syncInterval: number;
   proxyUrl: string; // 代理服务器地址，例如 http://your-proxy.com:8080
+  enableScheduledSync: boolean; // 定时同步开关
+  scheduledSyncInterval: number; // 定时同步间隔（分钟）
+  syncOnDelete: boolean; // 本地删除时同步删除云端
+  maxConcurrentUploads: number; // 最大并发上传数
+  maxRetryAttempts: number; // API 请求最大重试次数
+  syncLog: SyncLogEntry[]; // 同步日志（持久化）
 }
 
 // 默认设置
@@ -21,6 +107,12 @@ const DEFAULT_SETTINGS: FlybookPluginSettings = {
   autoSyncOnChange: false,
   syncInterval: 5, // 分钟
   proxyUrl: '', // 代理服务器地址，留空则直连
+  enableScheduledSync: false,
+  scheduledSyncInterval: 30, // 30 分钟
+  syncOnDelete: true,
+  maxConcurrentUploads: 3,
+  maxRetryAttempts: 3,
+  syncLog: [],
 };
 
 /**
@@ -312,6 +404,89 @@ export class FlybookSettingTab extends PluginSettingTab {
         });
     }
 
+    // 本地删除时同步删除云端
+    new Setting(containerEl)
+      .setName('同步删除')
+      .setDesc('本地文件删除时，同时删除飞书云端的对应文件')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.syncOnDelete)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.syncOnDelete = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // 定时同步
+    new Setting(containerEl)
+      .setName('定时同步')
+      .setDesc('按固定时间间隔自动执行同步，无需文件变化触发')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableScheduledSync)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableScheduledSync = value;
+            await this.plugin.saveSettings();
+            this.plugin.toggleScheduledSync(value);
+            this.display();
+          });
+      });
+
+    if (this.plugin.settings.enableScheduledSync) {
+      new Setting(containerEl)
+        .setName('定时同步间隔（分钟）')
+        .setDesc('定时同步的执行间隔，最小1分钟')
+        .addText((text: TextComponent) => {
+          text.inputEl.style.width = '80px';
+          text.setPlaceholder('30')
+            .setValue(this.plugin.settings.scheduledSyncInterval.toString())
+            .onChange(async (value: string) => {
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num > 0 && num <= 1440) {
+                this.plugin.settings.scheduledSyncInterval = num;
+                await this.plugin.saveSettings();
+                // 重新启动定时器
+                if (this.plugin.settings.enableScheduledSync) {
+                  this.plugin.toggleScheduledSync(false);
+                  this.plugin.toggleScheduledSync(true);
+                }
+              } else {
+                new Notice('请输入有效的数字（大于0且不超过1440）');
+              }
+            });
+        });
+    }
+
+    // 分隔线
+    containerEl.createEl('hr');
+
+    // 高级设置
+    containerEl.createEl('h3', { text: '高级设置' });
+
+    new Setting(containerEl)
+      .setName('最大并发上传数')
+      .setDesc('同时上传的最大文件数（1-10），过高可能触发飞书速率限制')
+      .addSlider((slider) => {
+        slider.setLimits(1, 10, 1)
+          .setValue(this.plugin.settings.maxConcurrentUploads)
+          .setDynamicTooltip()
+          .onChange(async (value: number) => {
+            this.plugin.settings.maxConcurrentUploads = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('API 请求重试次数')
+      .setDesc('网络请求失败时的最大重试次数')
+      .addSlider((slider) => {
+        slider.setLimits(0, 5, 1)
+          .setValue(this.plugin.settings.maxRetryAttempts)
+          .setDynamicTooltip()
+          .onChange(async (value: number) => {
+            this.plugin.settings.maxRetryAttempts = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
     // 分隔线
     containerEl.createEl('hr');
 
@@ -437,6 +612,50 @@ export class FlybookSettingTab extends PluginSettingTab {
               button.setDisabled(false);
               button.setButtonText('立即同步');
             }
+          });
+      });
+
+    // 从飞书下载
+    new Setting(containerEl)
+      .setName('从飞书下载')
+      .setDesc('将飞书云端的文件下载到本地（覆盖本地同名文件）')
+      .addButton((button) => {
+        button.setButtonText('从飞书下载')
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText('下载中...');
+            try {
+              await this.plugin.downloadFromFeishu();
+              new Notice('下载完成！');
+            } catch (error) {
+              new Notice('下载失败：' + (error as Error).message);
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText('从飞书下载');
+            }
+          });
+      });
+
+    // 同步日志
+    containerEl.createEl('h3', { text: '同步日志' });
+
+    new Setting(containerEl)
+      .setName('查看同步日志')
+      .setDesc('查看最近的同步操作记录')
+      .addButton((button) => {
+        button.setButtonText('查看日志')
+          .onClick(() => {
+            new SyncLogModal(this.app, this.plugin).open();
+          });
+      })
+      .addButton((button) => {
+        button.setButtonText('清除日志')
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.settings.syncLog = [];
+            await this.plugin.saveSettings();
+            new Notice('同步日志已清除');
           });
       });
 

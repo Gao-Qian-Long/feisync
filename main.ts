@@ -27,6 +27,15 @@ export default class FlybookPlugin extends Plugin {
   // Ribbon 图标元素
   ribbonIconEl: HTMLElement | null = null;
 
+  // 状态栏元素
+  statusBarItemEl: HTMLElement | null = null;
+
+  // 定时同步计时器
+  private scheduledSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  // 同步锁，防止并发同步
+  private isSyncing: boolean = false;
+
   /**
    * 插件加载时调用
    */
@@ -49,9 +58,17 @@ export default class FlybookPlugin extends Plugin {
     // 5. 添加 Ribbon 图标
     this.setupRibbonIcon();
 
-    // 6. 启动文件监控（如果已启用）
+    // 6. 添加状态栏
+    this.setupStatusBar();
+
+    // 7. 启动文件监控（如果已启用）
     if (this.settings.autoSyncOnChange && this.settings.localFolderPath) {
       this.toggleFileWatcher(true);
+    }
+
+    // 8. 启动定时同步（如果已启用）
+    if (this.settings.enableScheduledSync) {
+      this.toggleScheduledSync(true);
     }
 
     console.log('[Flybook] 插件加载完成');
@@ -68,6 +85,9 @@ export default class FlybookPlugin extends Plugin {
       this.fileWatcher.stop();
     }
 
+    // 停止定时同步
+    this.toggleScheduledSync(false);
+
     // 移除 Ribbon 图标
     if (this.ribbonIconEl) {
       this.ribbonIconEl.remove();
@@ -83,6 +103,10 @@ export default class FlybookPlugin extends Plugin {
     try {
       const loadedData = await this.loadData();
       this.settings = Object.assign({}, getDefaultSettings(), loadedData);
+      // 确保 syncLog 是数组
+      if (!Array.isArray(this.settings.syncLog)) {
+        this.settings.syncLog = [];
+      }
       console.log('[Flybook] 设置加载成功');
     } catch (error) {
       console.error('[Flybook] 加载设置失败:', error);
@@ -101,18 +125,21 @@ export default class FlybookPlugin extends Plugin {
       // 如果认证信息变更，更新或创建 authManager
       if (this.settings.appId && this.settings.appSecret) {
         if (this.authManager) {
-          // 已存在则更新凭证
           this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
         } else {
-          // 不存在则创建
           this.authManager = new FeishuAuthManager(
             this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
             () => this.saveUserToken()
           );
-          // 同时创建依赖的 API 客户端和同步引擎
-          this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl);
+          this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl, this.settings.maxRetryAttempts);
           this.syncEngine = new SyncEngine(this, this.apiClient);
         }
+      }
+
+      // 更新 API 客户端配置
+      if (this.apiClient) {
+        this.apiClient.updateProxyUrl(this.settings.proxyUrl);
+        this.apiClient.updateMaxRetries(this.settings.maxRetryAttempts);
       }
 
       // 更新文件监控配置
@@ -139,7 +166,7 @@ export default class FlybookPlugin extends Plugin {
 
     // API 客户端
     if (this.authManager) {
-      this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl);
+      this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl, this.settings.maxRetryAttempts);
     }
 
     // 同步引擎
@@ -149,8 +176,8 @@ export default class FlybookPlugin extends Plugin {
 
     // 文件监控器
     this.fileWatcher = new FileWatcher(this);
-    
-    // 从存储中恢复用户授权信息（必须 await，否则后续操作可能报未授权）
+
+    // 从存储中恢复用户授权信息
     await this.loadUserToken();
   }
 
@@ -189,7 +216,6 @@ export default class FlybookPlugin extends Plugin {
 
   /**
    * 加载同步记录
-   * @returns 文件路径到同步记录的映射
    */
   async loadSyncRecords(): Promise<Record<string, FileSyncRecord>> {
     try {
@@ -209,7 +235,6 @@ export default class FlybookPlugin extends Plugin {
 
   /**
    * 保存同步记录
-   * @param records 文件路径到同步记录的映射
    */
   async saveSyncRecords(records: Record<string, FileSyncRecord>): Promise<void> {
     try {
@@ -231,12 +256,26 @@ export default class FlybookPlugin extends Plugin {
       id: 'flybook-sync',
       name: 'Sync now',
       callback: async () => {
-        try {
-          await this.sync();
-          new Notice('同步完成');
-        } catch (error) {
-          new Notice('同步失败: ' + (error as Error).message);
-        }
+        await this.sync();
+      },
+    });
+
+    // 从飞书下载命令
+    this.addCommand({
+      id: 'flybook-download',
+      name: 'Download from Feishu',
+      callback: async () => {
+        await this.downloadFromFeishu();
+      },
+    });
+
+    // 查看同步日志
+    this.addCommand({
+      id: 'flybook-log',
+      name: 'View sync log',
+      callback: () => {
+        // 打开设置页面
+        this.settingTab?.display();
       },
     });
   }
@@ -246,18 +285,19 @@ export default class FlybookPlugin extends Plugin {
    */
   private setupRibbonIcon(): void {
     this.ribbonIconEl = this.addRibbonIcon('cloud-upload', '同步到飞书', async (evt: MouseEvent) => {
-      // 点击时显示菜单
       const menu = new Menu();
       menu.addItem((item) => {
         item.setTitle('立即同步')
           .setIcon('sync')
           .onClick(async () => {
-            try {
-              await this.sync();
-              new Notice('同步完成');
-            } catch (error) {
-              new Notice('同步失败: ' + (error as Error).message);
-            }
+            await this.sync();
+          });
+      });
+      menu.addItem((item) => {
+        item.setTitle('从飞书下载')
+          .setIcon('download')
+          .onClick(async () => {
+            await this.downloadFromFeishu();
           });
       });
       menu.addItem((item) => {
@@ -272,19 +312,33 @@ export default class FlybookPlugin extends Plugin {
   }
 
   /**
+   * 设置状态栏
+   */
+  private setupStatusBar(): void {
+    this.statusBarItemEl = this.addStatusBarItem();
+    this.updateStatusBar('就绪');
+  }
+
+  /**
+   * 更新状态栏
+   */
+  updateStatusBar(text: string, icon?: string): void {
+    if (!this.statusBarItemEl) return;
+    this.statusBarItemEl.setText(`Flybook: ${text}`);
+    this.statusBarItemEl.title = `Obsidian Flybook - ${text}`;
+  }
+
+  /**
    * 测试连接（单步）
-   * @returns 测试结果 { success, message }
    */
   async testStep(step: 'local-to-proxy' | 'proxy-to-feishu' | 'direct-to-feishu'): Promise<{ success: boolean; message: string }> {
     const proxyUrl = this.settings.proxyUrl;
 
-    // 步骤1：本地 → 代理服务器
     if (step === 'local-to-proxy') {
       if (!proxyUrl) {
         return { success: false, message: '未配置代理服务器地址' };
       }
       try {
-        // 仅测试能否到达代理服务器，发送一个简单请求
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
         const response = await fetch(proxyUrl, {
@@ -292,7 +346,6 @@ export default class FlybookPlugin extends Plugin {
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
-        // 只要能连上就算成功（即使返回 404 也说明代理可达）
         return { success: true, message: `代理服务器可达（HTTP ${response.status}）` };
       } catch (error) {
         const msg = (error as Error).message;
@@ -303,7 +356,6 @@ export default class FlybookPlugin extends Plugin {
       }
     }
 
-    // 步骤2：代理服务器 → 飞书（或直连飞书）
     if (!this.authManager && this.settings.appId && this.settings.appSecret) {
       this.authManager = new FeishuAuthManager(
         this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
@@ -330,43 +382,14 @@ export default class FlybookPlugin extends Plugin {
   }
 
   /**
-   * 测试连接（旧接口，保留兼容）
-   */
-  async testConnection(): Promise<boolean> {
-    // 如果 authManager 不存在但凭证已配置，则初始化
-    if (!this.authManager && this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(
-        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
-        () => this.saveUserToken()
-      );
-    }
-
-    if (!this.authManager) {
-      new Notice('请先配置飞书凭证');
-      return false;
-    }
-
-    try {
-      const token = await this.authManager.getAccessToken();
-      const isValid = await validateToken(token, this.settings.proxyUrl);
-
-      if (isValid) {
-        console.log('[Flybook] 连接测试成功');
-        return true;
-      } else {
-        console.warn('[Flybook] 连接测试失败：令牌无效');
-        return false;
-      }
-    } catch (error) {
-      console.error('[Flybook] 连接测试异常:', error);
-      return false;
-    }
-  }
-
-  /**
    * 执行同步
    */
   async sync(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('同步正在进行中，请稍候...');
+      return;
+    }
+
     if (!this.syncEngine) {
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
@@ -383,13 +406,74 @@ export default class FlybookPlugin extends Plugin {
       throw new Error('请先配置本地同步文件夹');
     }
 
-    console.log('[Flybook] 开始同步...');
-    await this.syncEngine.sync();
-    console.log('[Flybook] 同步流程结束');
+    this.isSyncing = true;
+    this.updateStatusBar('同步中...');
+
+    try {
+      console.log('[Flybook] 开始同步...');
+      await this.syncEngine.sync();
+      console.log('[Flybook] 同步流程结束');
+      this.updateStatusBar('同步完成');
+    } catch (error) {
+      this.updateStatusBar('同步失败');
+      throw error;
+    } finally {
+      this.isSyncing = false;
+      // 3秒后恢复就绪状态
+      setTimeout(() => {
+        if (!this.isSyncing) {
+          this.updateStatusBar('就绪');
+        }
+      }, 3000);
+    }
   }
 
   /**
-   * 检查插件是否已配置（凭证是否完整）
+   * 从飞书下载
+   */
+  async downloadFromFeishu(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('同步正在进行中，请稍候...');
+      return;
+    }
+
+    if (!this.syncEngine) {
+      throw new Error('同步引擎未初始化，请检查凭证配置');
+    }
+
+    if (!this.isConfigured()) {
+      throw new Error('请先配置飞书 App ID 和 App Secret');
+    }
+
+    if (!this.authManager?.isUserAuthorized()) {
+      throw new Error('用户未授权，请先在设置中完成飞书 OAuth 授权');
+    }
+
+    if (!this.settings.localFolderPath) {
+      throw new Error('请先配置本地同步文件夹');
+    }
+
+    this.isSyncing = true;
+    this.updateStatusBar('下载中...');
+
+    try {
+      await this.syncEngine.downloadFromFeishu();
+      this.updateStatusBar('下载完成');
+    } catch (error) {
+      this.updateStatusBar('下载失败');
+      throw error;
+    } finally {
+      this.isSyncing = false;
+      setTimeout(() => {
+        if (!this.isSyncing) {
+          this.updateStatusBar('就绪');
+        }
+      }, 3000);
+    }
+  }
+
+  /**
+   * 检查插件是否已配置
    */
   isConfigured(): boolean {
     return !!this.settings.appId && !!this.settings.appSecret;
@@ -408,6 +492,33 @@ export default class FlybookPlugin extends Plugin {
       this.fileWatcher.updateConfig(this.settings.localFolderPath, true);
     } else {
       this.fileWatcher.stop();
+    }
+  }
+
+  /**
+   * 切换定时同步
+   */
+  toggleScheduledSync(enable: boolean): void {
+    // 清除旧定时器
+    if (this.scheduledSyncTimer) {
+      clearInterval(this.scheduledSyncTimer);
+      this.scheduledSyncTimer = null;
+    }
+
+    if (enable && this.settings.scheduledSyncInterval > 0) {
+      const intervalMs = this.settings.scheduledSyncInterval * 60 * 1000;
+      console.log(`[Flybook] 启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
+
+      this.scheduledSyncTimer = setInterval(async () => {
+        try {
+          console.log('[Flybook] 定时同步触发');
+          await this.sync();
+        } catch (error) {
+          console.error('[Flybook] 定时同步失败:', error);
+        }
+      }, intervalMs);
+    } else {
+      console.log('[Flybook] 定时同步已停止');
     }
   }
 }

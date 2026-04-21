@@ -226,9 +226,12 @@ export class FeishuAuthManager {
     
     // 请求必要的权限范围
     // drive:drive - 访问云文档/云空间
+    // drive:export:readonly - 导出云文档（下载在线文档需要）
+    // drive:file:download - 下载云空间文件
     // docx:document - 访问和编辑新版文档
     // docs:document:import - 导入文档
-    const scope = 'drive:drive docx:document docs:document:import offline_access';
+    // docs:document:export - 导出文档（导出在线文档需要）
+    const scope = 'drive:drive drive:export:readonly drive:file:download docx:document docs:document:import docs:document:export offline_access';
     
     const params = new URLSearchParams({
       app_id: this.appId,
@@ -484,6 +487,7 @@ export class FeishuAuthManager {
   /**
    * 获取有效的用户访问令牌
    * 如果用户令牌不存在或已过期，自动刷新
+   * 注意：飞书 refresh_token 是一次性的，刷新成功后旧 token 立即失效
    */
   async getUserAccessToken(): Promise<string> {
     // 如果没有用户令牌，抛出错误
@@ -497,7 +501,19 @@ export class FeishuAuthManager {
       try {
         await this.refreshUserToken();
       } catch (error) {
+        // refresh_token 是一次性的，刷新失败后旧 token 已被撤销
+        // 必须清除用户令牌信息，防止后续请求继续使用失效的 refresh_token
+        const errMsg = (error as Error).message || '';
         console.error('[Flybook] 刷新用户令牌失败:', error);
+        
+        if (errMsg.includes('invalid_grant') || errMsg.includes('revoked') || errMsg.includes('20064')) {
+          // refresh_token 已被撤销，需要重新授权
+          console.warn('[Flybook] refresh_token 已失效，需要重新授权');
+          this.clearUserToken();
+          this.onTokenChange?.();
+          throw new Error('用户令牌已过期且刷新失败，请重新授权');
+        }
+        
         throw new Error('用户令牌已过期，请重新授权');
       }
     }
