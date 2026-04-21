@@ -1,5 +1,5 @@
 import FlybookPlugin from './main';
-import { App, PluginSettingTab, Setting, Notice, TextComponent } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, TextComponent, AbstractInputSuggest, TFolder, Modal } from 'obsidian';
 
 // 设置接口
 export interface FlybookPluginSettings {
@@ -28,6 +28,116 @@ const DEFAULT_SETTINGS: FlybookPluginSettings = {
  */
 export function getDefaultSettings(): FlybookPluginSettings {
   return Object.assign({}, DEFAULT_SETTINGS);
+}
+
+/**
+ * 文件夹路径输入建议器
+ * 输入时自动下拉显示仓库中所有文件夹供选择
+ */
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+  constructor(app: App, inputEl: HTMLInputElement) {
+    super(app, inputEl);
+  }
+
+  getSuggestions(query: string): TFolder[] {
+    const allFolders: TFolder[] = [];
+    const queue: TFolder[] = [this.app.vault.getRoot()];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      allFolders.push(current);
+      for (const child of current.children) {
+        if (child instanceof TFolder) {
+          queue.push(child);
+        }
+      }
+    }
+
+    if (!query) {
+      return allFolders;
+    }
+    const lowerQuery = query.toLowerCase();
+    return allFolders.filter(f => f.path.toLowerCase().includes(lowerQuery));
+  }
+
+  renderSuggestion(value: TFolder, el: HTMLElement): void {
+    el.setText(value.path || '/');
+  }
+
+  selectSuggestion(value: TFolder, _evt: MouseEvent | KeyboardEvent): void {
+    this.setValue(value.path);
+    this.close();
+  }
+}
+
+/**
+ * 文件夹选择弹窗
+ * 以列表形式展示仓库中的所有文件夹，点击即可选择
+ */
+class FolderSelectModal extends Modal {
+  private onSelect: (path: string) => void;
+
+  constructor(app: App, onSelect: (path: string) => void) {
+    super(app);
+    this.onSelect = onSelect;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText('选择同步文件夹');
+
+    // 获取所有文件夹
+    const allFolders: TFolder[] = [];
+    const queue: TFolder[] = [this.app.vault.getRoot()];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      allFolders.push(current);
+      for (const child of current.children) {
+        if (child instanceof TFolder) {
+          queue.push(child);
+        }
+      }
+    }
+
+    // 排序：根目录在前，然后按路径字母顺序
+    allFolders.sort((a, b) => {
+      if (a.path === '') return -1;
+      if (b.path === '') return 1;
+      return a.path.localeCompare(b.path);
+    });
+
+    const listEl = contentEl.createEl('div', { cls: 'flybook-folder-list' });
+    listEl.style.maxHeight = '400px';
+    listEl.style.overflowY = 'auto';
+    listEl.style.border = '1px solid var(--background-modifier-border)';
+    listEl.style.borderRadius = '4px';
+
+    for (const folder of allFolders) {
+      const item = listEl.createEl('div', {
+        cls: 'flybook-folder-item',
+        text: folder.path || '/ (根目录)'
+      });
+      item.style.padding = '8px 12px';
+      item.style.cursor = 'pointer';
+      item.style.borderBottom = '1px solid var(--background-modifier-border)';
+
+      item.addEventListener('mouseenter', () => {
+        item.style.backgroundColor = 'var(--background-modifier-hover)';
+      });
+      item.addEventListener('mouseleave', () => {
+        item.style.backgroundColor = '';
+      });
+
+      item.addEventListener('click', () => {
+        this.onSelect(folder.path);
+        this.close();
+      });
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 // 设置选项卡类
@@ -88,17 +198,31 @@ export class FlybookSettingTab extends PluginSettingTab {
           });
       });
 
-    // 本地文件夹路径
+    // 本地文件夹路径（输入框 + 浏览按钮）
+    let folderTextComp: TextComponent;
     new Setting(containerEl)
       .setName('本地同步文件夹')
-      .setDesc('相对于仓库根目录的路径，例如 "Notes" 或 "Daily Notes"')
+      .setDesc('选择要同步到飞书的本地文件夹')
       .addText((text: TextComponent) => {
+        folderTextComp = text;
         text.inputEl.style.width = '100%';
         text.setPlaceholder('Notes')
           .setValue(this.plugin.settings.localFolderPath)
           .onChange(async (value: string) => {
             this.plugin.settings.localFolderPath = value.trim();
             await this.plugin.saveSettings();
+          });
+        // 保留输入时的下拉建议
+        new FolderSuggest(this.app, text.inputEl);
+      })
+      .addButton((button) => {
+        button.setButtonText('浏览...')
+          .onClick(() => {
+            new FolderSelectModal(this.app, (selectedPath: string) => {
+              this.plugin.settings.localFolderPath = selectedPath;
+              this.plugin.saveSettings();
+              folderTextComp.setValue(selectedPath);
+            }).open();
           });
       });
 
