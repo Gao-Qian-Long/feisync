@@ -44,11 +44,11 @@ export class FileWatcher {
   private start(): void {
     console.log('[Flybook] 启动文件监控，监控路径:', this.watchedPath);
 
-    // 监听 Vault 事件
-    this.vault.on('create', this.handleCreate);
-    this.vault.on('modify', this.handleModify);
-    this.vault.on('delete', this.handleDelete);
-    this.vault.on('rename', this.handleRename);
+    // 监听 Vault 事件（使用类型断言解决 TypeScript 类型兼容性）
+    this.vault.on('create', this.handleCreate as (...args: unknown[]) => unknown);
+    this.vault.on('modify', this.handleModify as (...args: unknown[]) => unknown);
+    this.vault.on('delete', this.handleDelete as (...args: unknown[]) => unknown);
+    this.vault.on('rename', this.handleRename as (...args: unknown[]) => unknown);
   }
 
   /**
@@ -57,11 +57,11 @@ export class FileWatcher {
   stop(): void {
     console.log('[Flybook] 停止文件监控');
 
-    // 移除事件监听
-    this.vault.off('create', this.handleCreate);
-    this.vault.off('modify', this.handleModify);
-    this.vault.off('delete', this.handleDelete);
-    this.vault.off('rename', this.handleRename);
+    // 移除事件监听（使用相同的类型断言）
+    this.vault.off('create', this.handleCreate as (...args: unknown[]) => unknown);
+    this.vault.off('modify', this.handleModify as (...args: unknown[]) => unknown);
+    this.vault.off('delete', this.handleDelete as (...args: unknown[]) => unknown);
+    this.vault.off('rename', this.handleRename as (...args: unknown[]) => unknown);
 
     // 清理所有防抖定时器
     this.debounceTimers.forEach(timer => clearTimeout(timer));
