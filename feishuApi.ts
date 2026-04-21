@@ -482,6 +482,100 @@ export class FeishuApiClient {
   }
 
   /**
+   * 获取文档所有块
+   * @param docToken 文档 token
+   * @returns 文档块数组
+   */
+  async getDocumentBlocks(docToken: string): Promise<any[]> {
+    try {
+      const headers = await this.getHeaders();
+      const endpoint = this.getApiUrl(`/open-apis/doc/v1/documents/${docToken}/blocks?page_size=500`);
+      
+      const data = await this.fetchWithTimeout(endpoint, {
+        method: 'GET',
+        headers,
+      });
+      
+      if (data.code !== 0) {
+        throw new Error(`获取文档块失败: ${data.msg}`);
+      }
+      
+      return data.data?.items || [];
+    } catch (error) {
+      console.error('[Flybook] 获取文档块失败:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 删除文档中的块
+   * @param docToken 文档 token
+   * @param blockIds 要删除的块 ID 数组
+   */
+  async deleteDocumentBlocks(docToken: string, blockIds: string[]): Promise<void> {
+    if (!blockIds || blockIds.length === 0) {
+      return;
+    }
+    
+    try {
+      const headers = await this.getHeaders();
+      const endpoint = this.getApiUrl(`/open-apis/doc/v1/documents/${docToken}/blocks/batch_delete`);
+      
+      const body = {
+        block_ids: blockIds,
+      };
+      
+      const data = await this.fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      
+      if (data.code !== 0) {
+        throw new Error(`删除文档块失败: ${data.msg}`);
+      }
+    } catch (error) {
+      console.error('[Flybook] 删除文档块失败:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 更新文档内容（先清空再插入新内容）
+   * @param docToken 文档 token
+   * @param blocks 新的文档块数组
+   */
+  async updateDocumentContent(docToken: string, blocks: any[]): Promise<void> {
+    try {
+      // 1. 获取文档现有块
+      console.log(`[Flybook] 获取文档 ${docToken} 现有块...`);
+      const existingBlocks = await this.getDocumentBlocks(docToken);
+      
+      // 2. 收集需要删除的块 ID（排除文档容器本身）
+      const blockIdsToDelete = existingBlocks
+        .filter(block => block.block_id)
+        .map(block => block.block_id);
+      
+      // 3. 删除所有现有块
+      if (blockIdsToDelete.length > 0) {
+        console.log(`[Flybook] 删除 ${blockIdsToDelete.length} 个现有块...`);
+        await this.deleteDocumentBlocks(docToken, blockIdsToDelete);
+      }
+      
+      // 4. 插入新内容
+      if (blocks && blocks.length > 0) {
+        console.log(`[Flybook] 插入 ${blocks.length} 个新块...`);
+        await this.insertDocumentBlocks(docToken, blocks);
+      }
+      
+      console.log(`[Flybook] 文档 ${docToken} 内容更新完成`);
+    } catch (error) {
+      console.error('[Flybook] 更新文档内容失败:', error);
+      throw error;
+    }
+  }
+
+  /**
    * 将 Markdown 文本转换为飞书文档 blocks
    * @param markdownContent Markdown 格式的文本内容
    * @returns 飞书文档 blocks 数组

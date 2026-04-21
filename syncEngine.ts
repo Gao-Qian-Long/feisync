@@ -172,36 +172,54 @@ export class SyncEngine {
       throw new Error(`文件大小超过20MB限制`);
     }
 
-    // 使用导入方式创建飞书文档
-    // 文件名作为文档标题，保持扩展名便于识别类型
+    // 文件名作为文档标题
     const documentTitle = file.name;
 
-    console.log(`[Flybook] 开始导入文件到飞书文档: ${documentTitle}`);
+    console.log(`[Flybook] 开始同步文件到飞书: ${documentTitle}`);
+
+    // 检查云端是否已存在同名文件
+    let existingFile = null;
+    try {
+      existingFile = await this.apiClient.findFileByName(documentTitle, parentFolderToken);
+    } catch (error) {
+      console.warn(`[Flybook] 检查云端文件存在性失败，继续创建新文件:`, error);
+    }
 
     try {
-      // 使用 importFileAsDocument 方法导入文件
-      const docToken = await this.apiClient.importFileAsDocument(
-        content,
-        file.name,
-        parentFolderToken
-      );
+      if (existingFile) {
+        // 文件已存在，更新文档内容
+        console.log(`[Flybook] 云端已存在同名文档 ${documentTitle}，token: ${existingFile.token}，开始更新内容...`);
+        
+        // 将 Markdown 内容转换为 blocks
+        const blocks = this.apiClient.markdownToBlocks(content as string);
+        
+        // 更新文档内容
+        await this.apiClient.updateDocumentContent(existingFile.token, blocks);
+        console.log(`[Flybook] 文档 ${documentTitle} 内容更新成功`);
+      } else {
+        // 文件不存在，创建新文档
+        console.log(`[Flybook] 云端不存在同名文档，开始导入新文档: ${documentTitle}`);
+        
+        const docToken = await this.apiClient.importFileAsDocument(
+          content,
+          file.name,
+          parentFolderToken
+        );
+        console.log(`[Flybook] 文档导入成功，token: ${docToken}`);
 
-      console.log(`[Flybook] 文档导入成功，token: ${docToken}`);
-
-      // 如果有目标文件夹，将导入的文档移动到目标文件夹
-      if (parentFolderToken) {
-        try {
-          console.log(`[Flybook] 准备移动文档 ${docToken} 到文件夹 ${parentFolderToken}`);
-          await this.apiClient.moveFile(docToken, 'docx', parentFolderToken);
-          console.log(`[Flybook] 文档已移动到目标文件夹: ${parentFolderToken}`);
-        } catch (moveError) {
-          console.warn(`[Flybook] 移动文档到目标文件夹失败:`, moveError);
-          // 不抛出错误，因为导入本身已经成功了
+        // 如果有目标文件夹，将导入的文档移动到目标文件夹
+        if (parentFolderToken) {
+          try {
+            console.log(`[Flybook] 准备移动文档 ${docToken} 到文件夹 ${parentFolderToken}`);
+            await this.apiClient.moveFile(docToken, 'docx', parentFolderToken);
+            console.log(`[Flybook] 文档已移动到目标文件夹: ${parentFolderToken}`);
+          } catch (moveError) {
+            console.warn(`[Flybook] 移动文档到目标文件夹失败:`, moveError);
+          }
         }
       }
-
     } catch (error) {
-      console.error(`[Flybook] 导入文件 ${file.name} 失败:`, error);
+      console.error(`[Flybook] 同步文件 ${file.name} 失败:`, error);
       throw error;
     }
   }
