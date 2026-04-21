@@ -320,15 +320,41 @@ export class FlybookSettingTab extends PluginSettingTab {
         .setName('进行用户授权')
         .setDesc('点击后将在浏览器中打开授权页面，授权完成后会自动获取令牌')
         .addButton((button) => {
+          let isAuthorizing = false;
+
+          const resetButton = () => {
+            isAuthorizing = false;
+            button.setDisabled(false);
+            button.setButtonText('开始授权');
+            button.buttonEl.classList.remove('mod-warning');
+            button.buttonEl.classList.add('mod-cta');
+          };
+
+          const setCancelState = () => {
+            isAuthorizing = true;
+            button.setDisabled(false);
+            button.setButtonText('取消授权');
+            button.buttonEl.classList.remove('mod-cta');
+            button.buttonEl.classList.add('mod-warning');
+          };
+
           button.setButtonText('开始授权')
             .setCta()
             .onClick(async () => {
-              try {
-                if (!this.plugin.authManager) {
-                  new Notice('认证管理器未初始化');
-                  return;
-                }
+              if (!this.plugin.authManager) {
+                new Notice('认证管理器未初始化');
+                return;
+              }
 
+              if (isAuthorizing) {
+                // 用户主动取消
+                this.plugin.authManager.abortLocalCallbackServer();
+                return;
+              }
+
+              setCancelState();
+
+              try {
                 // 先启动本地回调服务器
                 const codePromise = this.plugin.authManager.startLocalCallbackServer(9527);
 
@@ -347,7 +373,11 @@ export class FlybookSettingTab extends PluginSettingTab {
                 new Notice('授权成功！');
                 this.display();
               } catch (error) {
-                new Notice('授权失败：' + (error as Error).message);
+                const msg = (error as Error).message;
+                if (msg !== '授权已取消') {
+                  new Notice('授权失败：' + msg);
+                }
+                resetButton();
               }
             });
         });

@@ -154,11 +154,10 @@ export default class FlybookPlugin extends Plugin {
   private async loadUserToken(): Promise<void> {
     try {
       const data = await this.loadData();
-      if (data && data.feshuUserToken) {
-        const tokenInfo = JSON.parse(data.feshuUserToken);
-        if (tokenInfo && tokenInfo.expiresAt > Date.now()) {
+      if (data && data.feishuUserToken) {
+        const tokenInfo = JSON.parse(data.feishuUserToken);
+        if (tokenInfo) {
           this.authManager?.loadUserTokenFromData(tokenInfo);
-          console.log('[Flybook] 用户令牌已从存储恢复');
         }
       }
     } catch (error) {
@@ -173,7 +172,7 @@ export default class FlybookPlugin extends Plugin {
     if (this.authManager?.isUserAuthorized()) {
       try {
         const data = await this.loadData();
-        data.feshuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
+        data.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
         await this.saveData(data);
         console.log('[Flybook] 用户令牌已保存');
       } catch (error) {
@@ -272,6 +271,10 @@ export default class FlybookPlugin extends Plugin {
 
     if (!this.isConfigured()) {
       throw new Error('请先配置飞书 App ID 和 App Secret');
+    }
+
+    if (!this.authManager?.isUserAuthorized()) {
+      throw new Error('用户未授权，请先在设置中完成飞书 OAuth 授权');
     }
 
     if (!this.settings.localFolderPath) {

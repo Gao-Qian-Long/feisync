@@ -31,6 +31,7 @@ export class FeishuAuthManager {
   // 用户授权相关
   private userTokenInfo: UserTokenInfo | null = null;
   private oauthState: string = '';  // OAuth 状态码，用于防止 CSRF 攻击
+  private callbackCancelFn: (() => void) | null = null; // 用于取消本地回调等待
 
   constructor(appId: string, appSecret: string, proxyUrl: string = '') {
     this.appId = appId;
@@ -228,7 +229,7 @@ export class FeishuAuthManager {
     // drive:drive - 访问云文档/云空间
     // docx:document - 访问和编辑新版文档
     // docs:document:import - 导入文档
-    const scope = 'drive:drive docx:document docs:document:import';
+    const scope = 'drive:drive docx:document docs:document:import offline_access';
     
     const params = new URLSearchParams({
       app_id: this.appId,
@@ -252,8 +253,10 @@ export class FeishuAuthManager {
     return new Promise((resolve, reject) => {
       let server: http.Server | null = null;
       let timeoutId: NodeJS.Timeout | null = null;
+      let resolved = false; // 防止浏览器重复请求导致多次处理
 
       const cleanup = () => {
+        this.callbackCancelFn = null;
         if (timeoutId) {
           clearTimeout(timeoutId);
           timeoutId = null;
@@ -266,7 +269,23 @@ export class FeishuAuthManager {
         }
       };
 
+      // 注册取消函数，供外部主动中断
+      this.callbackCancelFn = () => {
+        cleanup();
+        if (!resolved) {
+          resolved = true;
+          reject(new Error('授权已取消'));
+        }
+      };
+
       server = http.createServer((req, res) => {
+        // 如果已经处理过，直接返回，不再重复处理
+        if (resolved) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<p>授权已完成，请关闭此页面。</p>');
+          return;
+        }
+
         try {
           const reqUrl = new URL(req.url || '/', `http://localhost:${port}`);
           const code = reqUrl.searchParams.get('code');
@@ -278,17 +297,16 @@ export class FeishuAuthManager {
             const errorDesc = reqUrl.searchParams.get('error_description') || '未知错误';
             res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`<h1>授权失败</h1><p>${error}: ${errorDesc}</p><p>请返回 Obsidian 查看详情。</p>`);
+            resolved = true;
             cleanup();
             reject(new Error(`飞书授权错误: ${error} - ${errorDesc}`));
             return;
           }
 
-          // 没有 code
+          // 没有 code（如 favicon.ico 等请求，忽略即可）
           if (!code) {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>授权失败</h1><p>未收到授权码，请返回 Obsidian 重试。</p>');
-            cleanup();
-            reject(new Error('未收到授权码'));
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not found');
             return;
           }
 
@@ -296,12 +314,14 @@ export class FeishuAuthManager {
           if (state !== this.oauthState) {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end('<h1>授权失败</h1><p>State 校验失败，可能存在安全风险。请返回 Obsidian 重试。</p>');
+            resolved = true;
             cleanup();
             reject(new Error('OAuth state 校验失败'));
             return;
           }
 
           // 成功捕获 code
+          resolved = true;
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(
             '<h1 style="color:green">授权成功！</h1>' +
@@ -313,16 +333,19 @@ export class FeishuAuthManager {
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end('<h1>服务器错误</h1><p>处理回调时发生异常，请返回 Obsidian 重试。</p>');
-          cleanup();
-          reject(err);
+          if (!resolved) {
+            resolved = true;
+            cleanup();
+            reject(err);
+          }
         }
       });
 
-      // 超时处理：5 分钟未收到回调则关闭服务器
+      // 超时处理：3 分钟未收到回调则关闭服务器
       timeoutId = setTimeout(() => {
         cleanup();
-        reject(new Error('等待授权回调超时（5分钟），请重新尝试授权'));
-      }, 5 * 60 * 1000);
+        reject(new Error('等待授权回调超时（3分钟），请重新尝试授权'));
+      }, 3 * 60 * 1000);
 
       server.listen(port, () => {
         console.log(`[Flybook] 本地回调服务器已启动，监听 http://localhost:${port}/callback`);
@@ -340,6 +363,15 @@ export class FeishuAuthManager {
   }
 
   /**
+   * 主动取消正在等待的本地回调服务器
+   */
+  abortLocalCallbackServer(): void {
+    if (this.callbackCancelFn) {
+      this.callbackCancelFn();
+    }
+  }
+
+  /**
    * 使用授权码获取用户访问令牌
    * @param code 授权码（用户授权后获得）
    * @param redirectUri 授权时使用的回调地址，必须与生成 URL 时一致
@@ -347,7 +379,7 @@ export class FeishuAuthManager {
    */
   async exchangeCodeForUserToken(code: string, redirectUri: string = 'http://localhost:9527/callback'): Promise<UserTokenInfo> {
     const url = this.getApiUrl('/open-apis/authen/v2/oauth/token');
-    
+
     const payload = {
       grant_type: 'authorization_code',
       client_id: this.appId,
@@ -357,7 +389,6 @@ export class FeishuAuthManager {
     };
 
     console.log('[Flybook] 正在交换授权码获取用户令牌...');
-    console.log('[Flybook] 请求 payload:', JSON.stringify(payload, null, 2));
 
     const response = await fetch(url, {
       method: 'POST',
@@ -374,23 +405,24 @@ export class FeishuAuthManager {
 
     const data = await response.json();
     console.log('[Flybook] OAuth 响应:', JSON.stringify(data, null, 2));
-    
+
     if (data.code !== 0) {
       throw new Error(`获取用户令牌失败: ${data.msg || data.error_description} (code: ${data.code || data.error})`);
     }
 
-    // 解析响应并保存用户令牌 (v2 接口直接返回 data.access_token)
+    // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
+    const result = data.data || data;
     const tokenInfo: UserTokenInfo = {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresAt: Date.now() + (data.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
-      openId: data.open_id || '',
-      unionId: data.union_id || '',
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token,
+      expiresAt: Date.now() + (result.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
+      openId: result.open_id || '',
+      unionId: result.union_id || '',
     };
 
     this.userTokenInfo = tokenInfo;
     console.log('[Flybook] 用户令牌获取成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    
+
     return tokenInfo;
   }
 
@@ -403,13 +435,13 @@ export class FeishuAuthManager {
       throw new Error('没有可刷新的用户令牌');
     }
 
-    const url = this.getApiUrl('/open-apis/authen/v2/oauth/refresh_access_token');
-    
+    const url = this.getApiUrl('/open-apis/authen/v2/oauth/token');
+
     const payload = {
       grant_type: 'refresh_token',
       refresh_token: this.userTokenInfo.refreshToken,
-      app_id: this.appId,
-      app_secret: this.appSecret,
+      client_id: this.appId,
+      client_secret: this.appSecret,
     };
 
     console.log('[Flybook] 正在刷新用户令牌...');
@@ -432,18 +464,19 @@ export class FeishuAuthManager {
       throw new Error(`刷新用户令牌失败: ${data.msg} (code: ${data.code})`);
     }
 
-    // 更新令牌信息
+    // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
+    const result = data.data || data;
     const tokenInfo: UserTokenInfo = {
-      accessToken: data.data.access_token,
-      refreshToken: data.data.refresh_token,
-      expiresAt: Date.now() + (data.data.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
-      openId: data.data.open_id,
-      unionId: data.data.union_id,
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token,
+      expiresAt: Date.now() + (result.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
+      openId: result.open_id || '',
+      unionId: result.union_id || '',
     };
 
     this.userTokenInfo = tokenInfo;
     console.log('[Flybook] 用户令牌刷新成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    
+
     return tokenInfo;
   }
 
@@ -473,9 +506,11 @@ export class FeishuAuthManager {
 
   /**
    * 检查用户是否已授权
+   * 只要存在 token 信息（含 refresh_token）即视为已授权，
+   * 过期后可通过 refresh_token 自动续期，无需重新授权
    */
   isUserAuthorized(): boolean {
-    return this.userTokenInfo !== null && Date.now() < this.userTokenInfo.expiresAt;
+    return this.userTokenInfo !== null && !!this.userTokenInfo.refreshToken;
   }
 
   /**
@@ -511,18 +546,20 @@ export class FeishuAuthManager {
 
   /**
    * 从本地存储恢复用户令牌
+   * 即使 access_token 已过期，只要有 refresh_token 就恢复，
+   * 后续调用 getUserAccessToken() 会自动刷新
    */
   loadUserTokenFromStorage(storage: any): void {
     const saved = storage.getString('feishuUserToken');
     if (saved) {
       try {
         const tokenInfo = JSON.parse(saved) as UserTokenInfo;
-        // 检查是否已过期
-        if (tokenInfo.expiresAt > Date.now()) {
+        if (tokenInfo.refreshToken) {
           this.userTokenInfo = tokenInfo;
-          console.log('[Flybook] 用户令牌已从存储恢复，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
+          const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
+          console.log(`[Flybook] 用户令牌已从存储恢复（${status}）`);
         } else {
-          console.log('[Flybook] 用户令牌已过期，需要重新授权');
+          console.log('[Flybook] 存储的令牌无 refresh_token，无法自动续期');
         }
       } catch (error) {
         console.error('[Flybook] 解析保存的用户令牌失败:', error);
@@ -532,13 +569,15 @@ export class FeishuAuthManager {
 
   /**
    * 从数据对象加载用户令牌（用于从插件 loadData 恢复）
+   * 即使 access_token 已过期，只要有 refresh_token 就恢复
    */
   loadUserTokenFromData(tokenInfo: UserTokenInfo): void {
-    if (tokenInfo.expiresAt > Date.now()) {
+    if (tokenInfo.refreshToken) {
       this.userTokenInfo = tokenInfo;
-      console.log('[Flybook] 用户令牌已恢复，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
+      const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
+      console.log(`[Flybook] 用户令牌已恢复（${status}）`);
     } else {
-      console.log('[Flybook] 用户令牌已过期，需要重新授权');
+      console.log('[Flybook] 恢复的令牌无 refresh_token，无法自动续期');
     }
   }
 
