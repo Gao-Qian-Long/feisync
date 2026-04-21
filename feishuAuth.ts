@@ -6,9 +6,6 @@
 
 import * as http from 'http';
 
-const FEISHU_AUTH_URL = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
-const FEISHU_OAUTH_URL = 'https://open.feishu.cn/open-apis/authen/v1/authorize';
-const FEISHU_TOKEN_URL = 'https://open.feishu.cn/open-apis/authen/v1/oidc/access_token';
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300; // 提前5分钟过期
 const REQUEST_TIMEOUT = 30000; // 请求超时时间（毫秒）
 
@@ -32,11 +29,13 @@ export class FeishuAuthManager {
   private userTokenInfo: UserTokenInfo | null = null;
   private oauthState: string = '';  // OAuth 状态码，用于防止 CSRF 攻击
   private callbackCancelFn: (() => void) | null = null; // 用于取消本地回调等待
+  private onTokenChange: (() => void) | null = null; // token 变化时的回调（用于持久化）
 
-  constructor(appId: string, appSecret: string, proxyUrl: string = '') {
+  constructor(appId: string, appSecret: string, proxyUrl: string = '', onTokenChange?: () => void) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.proxyUrl = proxyUrl;
+    this.onTokenChange = onTokenChange ?? null;
   }
 
   /**
@@ -422,6 +421,7 @@ export class FeishuAuthManager {
 
     this.userTokenInfo = tokenInfo;
     console.log('[Flybook] 用户令牌获取成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
+    this.onTokenChange?.();
 
     return tokenInfo;
   }
@@ -476,6 +476,7 @@ export class FeishuAuthManager {
 
     this.userTokenInfo = tokenInfo;
     console.log('[Flybook] 用户令牌刷新成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
+    this.onTokenChange?.();
 
     return tokenInfo;
   }

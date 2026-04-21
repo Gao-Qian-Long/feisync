@@ -3,7 +3,7 @@
  * 将本地 Obsidian 笔记同步到飞书 Drive
  */
 
-import { Plugin, Notice, Menu, setIcon } from 'obsidian';
+import { Plugin, Notice, Menu } from 'obsidian';
 import { FlybookPluginSettings, FlybookSettingTab, getDefaultSettings } from './settings';
 import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
@@ -37,7 +37,7 @@ export default class FlybookPlugin extends Plugin {
     await this.loadSettings();
 
     // 2. 初始化模块
-    this.initializeModules();
+    await this.initializeModules();
 
     // 3. 注册设置界面
     this.settingTab = new FlybookSettingTab(this.app, this);
@@ -105,7 +105,10 @@ export default class FlybookPlugin extends Plugin {
           this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
         } else {
           // 不存在则创建
-          this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
+          this.authManager = new FeishuAuthManager(
+            this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+            () => this.saveUserToken()
+          );
           // 同时创建依赖的 API 客户端和同步引擎
           this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl);
           this.syncEngine = new SyncEngine(this, this.apiClient);
@@ -125,10 +128,13 @@ export default class FlybookPlugin extends Plugin {
   /**
    * 初始化各模块
    */
-  private initializeModules(): void {
+  private async initializeModules(): Promise<void> {
     // 认证管理器
     if (this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
+      this.authManager = new FeishuAuthManager(
+        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+        () => this.saveUserToken()
+      );
     }
 
     // API 客户端
@@ -144,8 +150,8 @@ export default class FlybookPlugin extends Plugin {
     // 文件监控器
     this.fileWatcher = new FileWatcher(this);
     
-    // 尝试从存储中恢复用户授权信息（异步）
-    this.loadUserToken();
+    // 从存储中恢复用户授权信息（必须 await，否则后续操作可能报未授权）
+    await this.loadUserToken();
   }
 
   /**
@@ -236,7 +242,10 @@ export default class FlybookPlugin extends Plugin {
   async testConnection(): Promise<boolean> {
     // 如果 authManager 不存在但凭证已配置，则初始化
     if (!this.authManager && this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret);
+      this.authManager = new FeishuAuthManager(
+        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+        () => this.saveUserToken()
+      );
     }
 
     if (!this.authManager) {

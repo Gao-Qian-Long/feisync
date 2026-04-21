@@ -5,7 +5,7 @@
 
 import { Vault, TFile, TFolder } from 'obsidian';
 import FlybookPlugin from './main';
-import { FeishuApiClient, FeishuFileMeta } from './feishuApi';
+import { FeishuApiClient } from './feishuApi';
 import { Notice } from 'obsidian';
 
 export interface SyncResult {
@@ -126,7 +126,7 @@ export class SyncEngine {
   /**
    * 上传单个文件到飞书
    */
-  private async uploadFile(file: TFile, localFolderPath: string, targetFolderToken: string): Promise<void> {
+  private async uploadFile(file: TFile, _localFolderPath: string, targetFolderToken: string): Promise<void> {
     // 计算相对于监控文件夹的路径
     const relativePath = file.path;
     const pathParts = relativePath.split('/');

@@ -5,9 +5,6 @@
 
 import { FeishuAuthManager } from './feishuAuth';
 
-const FEISHU_DRIVE_API_BASE = 'https://open.feishu.cn/open-apis/drive/v1';
-const FEISHU_DOC_API_BASE = 'https://open.feishu.cn/open-apis/doc/v1';
-
 // 请求超时时间（毫秒）
 const REQUEST_TIMEOUT = 30000;
 
@@ -20,13 +17,6 @@ export interface FeishuFileMeta {
   size?: number;
   createdTime?: number;
   modifiedTime?: number;
-}
-
-// API 响应基础结构
-interface FeishuApiResponse<T = any> {
-  code: number;
-  msg: string;
-  data?: T;
 }
 
 /**
@@ -306,7 +296,9 @@ export class FeishuApiClient {
     }
 
     try {
-      const token = await this.authManager.getAccessToken();
+      const headers = await this.getHeaders();
+      // 删除 Content-Type，让浏览器自动设置 multipart/form-data 的 boundary
+      delete headers['Content-Type'];
 
       // 构建 FormData
       const formData = new FormData();
@@ -323,9 +315,7 @@ export class FeishuApiClient {
         this.getApiUrl('/open-apis/drive/v1/medias/upload_all'),
         {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
+          headers,
           body: formData,
         },
         60000 // 上传文件使用更长超时（60秒）
@@ -429,20 +419,9 @@ export class FeishuApiClient {
     }
 
     try {
-      // 优先使用 user_access_token（如果已授权）
-      let token: string;
-      if (this.authManager.isUserAuthorized()) {
-        try {
-          token = await this.authManager.getUserAccessToken();
-          console.log('[Flybook] 上传文件使用 user_access_token');
-        } catch (error) {
-          console.warn('[Flybook] 获取 user_access_token 失败，回退到 tenant_access_token');
-          token = await this.authManager.getAccessToken();
-        }
-      } else {
-        token = await this.authManager.getAccessToken();
-        console.log('[Flybook] 上传文件使用 tenant_access_token');
-      }
+      const headers = await this.getHeaders();
+      // 删除 Content-Type，让浏览器自动设置 multipart/form-data 的 boundary
+      delete headers['Content-Type'];
 
       // 确定文件扩展名
       // 原始扩展名用于导入任务API的file_extension校验
@@ -502,9 +481,7 @@ export class FeishuApiClient {
         this.getApiUrl('/open-apis/drive/v1/medias/upload_all'),
         {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
+          headers,
           body: formData,
         },
         60000 // 上传使用更长超时
