@@ -237,7 +237,65 @@ export default class FlybookPlugin extends Plugin {
   }
 
   /**
-   * 测试连接
+   * 测试连接（单步）
+   * @returns 测试结果 { success, message }
+   */
+  async testStep(step: 'local-to-proxy' | 'proxy-to-feishu' | 'direct-to-feishu'): Promise<{ success: boolean; message: string }> {
+    const proxyUrl = this.settings.proxyUrl;
+
+    // 步骤1：本地 → 代理服务器
+    if (step === 'local-to-proxy') {
+      if (!proxyUrl) {
+        return { success: false, message: '未配置代理服务器地址' };
+      }
+      try {
+        // 仅测试能否到达代理服务器，发送一个简单请求
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        // 只要能连上就算成功（即使返回 404 也说明代理可达）
+        return { success: true, message: `代理服务器可达（HTTP ${response.status}）` };
+      } catch (error) {
+        const msg = (error as Error).message;
+        if (msg.includes('abort')) {
+          return { success: false, message: '连接代理服务器超时（10秒）' };
+        }
+        return { success: false, message: `无法连接代理服务器: ${msg}` };
+      }
+    }
+
+    // 步骤2：代理服务器 → 飞书（或直连飞书）
+    if (!this.authManager && this.settings.appId && this.settings.appSecret) {
+      this.authManager = new FeishuAuthManager(
+        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+        () => this.saveUserToken()
+      );
+    }
+    if (!this.authManager) {
+      return { success: false, message: '请先配置飞书 App ID 和 App Secret' };
+    }
+
+    try {
+      const token = await this.authManager.getAccessToken();
+      const isValid = await validateToken(token, this.settings.proxyUrl);
+      if (isValid) {
+        const via = proxyUrl ? `经由代理 (${proxyUrl})` : '直连';
+        return { success: true, message: `飞书 API 连接成功（${via}），凭证有效` };
+      } else {
+        return { success: false, message: '飞书 API 可达，但凭证验证失败' };
+      }
+    } catch (error) {
+      const msg = (error as Error).message;
+      return { success: false, message: `飞书 API 连接失败: ${msg}` };
+    }
+  }
+
+  /**
+   * 测试连接（旧接口，保留兼容）
    */
   async testConnection(): Promise<boolean> {
     // 如果 authManager 不存在但凭证已配置，则初始化

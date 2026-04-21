@@ -185,7 +185,7 @@ export class FlybookSettingTab extends PluginSettingTab {
       });
 
     // 代理服务器配置（可选，用于解决 CORS 限制）
-    new Setting(containerEl)
+    const proxySetting = new Setting(containerEl)
       .setName('代理服务器地址（可选）')
       .setDesc('如果直接连接飞书 API 失败，请填写代理服务器地址。例如：http://your-proxy.com:8080')
       .addText((text: TextComponent) => {
@@ -195,6 +195,38 @@ export class FlybookSettingTab extends PluginSettingTab {
           .onChange(async (value: string) => {
             this.plugin.settings.proxyUrl = value.trim();
             await this.plugin.saveSettings();
+          });
+      });
+    // 让设置项纵向排列，输入框独占一整行
+    proxySetting.controlEl.style.flexWrap = 'wrap';
+    proxySetting.controlEl.style.width = '100%';
+
+    // 代理连接测试按钮（单独一行，避免挤压输入框）
+    new Setting(containerEl)
+      .setName('代理连接测试')
+      .setDesc('测试代理服务器是否可达以及飞书 API 是否连通')
+      .addButton((button) => {
+        button.setButtonText('测试连接')
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText('测试中...');
+            const proxyUrl = this.plugin.settings.proxyUrl;
+            if (proxyUrl) {
+              // 有代理：先测本地→代理，再测代理→飞书
+              const r1 = await this.plugin.testStep('local-to-proxy');
+              if (!r1.success) {
+                new Notice(`✗ ${r1.message}`);
+              } else {
+                const r2 = await this.plugin.testStep('proxy-to-feishu');
+                new Notice(r2.success ? `✓ ${r2.message}` : `✗ 本地→代理: ${r1.message}；代理→飞书: ${r2.message}`);
+              }
+            } else {
+              // 无代理：直连飞书
+              const result = await this.plugin.testStep('direct-to-feishu');
+              new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
+            }
+            button.setDisabled(false);
+            button.setButtonText('测试连接');
           });
       });
 
@@ -386,27 +418,6 @@ export class FlybookSettingTab extends PluginSettingTab {
     // 分隔线
     containerEl.createEl('hr');
 
-    // 测试连接按钮
-    new Setting(containerEl)
-      .setName('连接测试')
-      .setDesc('验证飞书凭证是否有效')
-      .addButton((button) => {
-        button.setButtonText('测试连接')
-          .setCta()
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText('测试中...');
-            const success = await this.plugin.testConnection();
-            if (success) {
-              new Notice('连接成功！飞书凭证有效。');
-            } else {
-              new Notice('连接失败！请检查 App ID 和 App Secret。');
-            }
-            button.setDisabled(false);
-            button.setButtonText('测试连接');
-          });
-      });
-
     // 手动同步按钮
     new Setting(containerEl)
       .setName('手动同步')
@@ -431,7 +442,7 @@ export class FlybookSettingTab extends PluginSettingTab {
 
     // 提示信息
     containerEl.createEl('p', {
-      text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 相关权限。',
+      text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive），用于上传文件到飞书云盘。',
       cls: 'flybook-hint'
     });
   }
