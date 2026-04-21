@@ -61,7 +61,7 @@ server {
 
     # CORS 头（允许跨域）
     add_header 'Access-Control-Allow-Origin' '*' always;
-    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+    add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
     add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type' always;
 
     location / {
@@ -82,16 +82,27 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection '';
+        
+        # 关键配置：确保 POST/PUT/DELETE 请求体正确转发
+        proxy_buffering off;
         proxy_ssl_server_name on;
         proxy_connect_timeout 30s;
-        proxy_send_timeout 30s;
-        proxy_read_timeout 30s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
     }
 }
 ```
 
-### 3. 保存并退出
+### 3. 配置说明
+
+| 配置项 | 说明 |
+|--------|------|
+| `Access-Control-Allow-Methods` | 必须包含 `DELETE` 方法，飞书文档块删除 API 使用 DELETE 请求 |
+| `proxy_buffering off` | 禁用缓冲，确保 POST/PUT/DELETE 请求体正确转发 |
+| `proxy_send_timeout 60s` | 增加超时时间，文档操作可能需要更长时间 |
+| `proxy_read_timeout 60s` | 增加读取超时时间 |
+
+### 4. 保存并退出
 
 按 `Ctrl+O` 保存，`Enter` 确认，`Ctrl+X` 退出。
 
@@ -108,7 +119,7 @@ sudo ln -s /etc/nginx/sites-available/feishu-proxy /etc/nginx/sites-enabled/
 ### 2. 禁用默认站点（如有冲突）
 
 ```bash
-sudo rm /etc/nginx/sites-enabled/default
+sudo rm -f /etc/nginx/sites-enabled/default
 ```
 
 ### 3. 测试配置语法
@@ -155,7 +166,7 @@ sudo firewall-cmd --reload
 
 ## 六、验证代理服务器
 
-### 1. 在服务器本地测试
+### 1. 在服务器本地测试（认证 API）
 
 ```bash
 curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/internal \
@@ -209,9 +220,29 @@ curl -4 ifconfig.me
 
 ---
 
-## 八、修改 Obsidian Flybook 插件
+## 八、配置飞书应用权限
 
-插件需要支持代理配置。修改方法请参考下一章节。
+### 需要的权限
+
+在飞书开放平台为应用添加以下权限：
+
+| 权限名称 | 权限标识 | 说明 |
+|----------|----------|------|
+| 查看、评论和编辑新版文档 | `docx:document` | 读写文档内容 |
+| 只读新版文档 | `docx:document:readonly` | 读取文档内容 |
+| 上传、下载文件或图片 | `drive:drive` | 云空间文件操作 |
+
+### 添加权限步骤
+
+1. 登录 [飞书开放平台](https://open.feishu.cn/app)
+2. 选择您的应用 → **权限管理**
+3. 点击「添加权限」，搜索并添加上述权限
+4. 保存配置
+5. **重要**：创建新版本并发布应用，权限才会生效
+
+### 用户重新授权
+
+发布新版本后，之前授权的用户需要**重新授权**才能获得新权限。
 
 ---
 
@@ -252,6 +283,19 @@ sudo ss -tlnp | grep :8080
 - 确认已将服务器 IPv4 地址添加到飞书 IP 白名单
 - 飞书白名单可能需要 5-10 分钟生效
 
+### 问题 5：API 返回 404
+
+- 确认使用的是正确的 HTTP 方法（GET/POST/DELETE）
+- 确认 Nginx 配置中的 `Access-Control-Allow-Methods` 包含所需的 HTTP 方法
+- 检查 API 路径是否正确
+
+### 问题 6：DELETE 请求返回 "404 page not found"
+
+这是因为原配置文件只允许 `GET, POST, OPTIONS` 方法。请更新配置：
+1. 添加 `DELETE` 到 `Access-Control-Allow-Methods`
+2. 添加 `proxy_buffering off`
+3. 重启 Nginx
+
 ---
 
 ## 十、完整命令汇总
@@ -280,7 +324,7 @@ sudo ufw allow 8080/tcp
 curl -4 ifconfig.me
 
 # 7. 本地测试
-curl -X POST http://服务器IP:8080/open-apis/auth/v3/tenant_access_token/internal \
+curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/internal \
   -H "Content-Type: application/json" \
   -d '{"app_id":"您的AppID","app_secret":"您的AppSecret"}'
 ```
@@ -289,4 +333,4 @@ curl -X POST http://服务器IP:8080/open-apis/auth/v3/tenant_access_token/inter
 
 ## 十一、后续步骤
 
-代理服务器搭建完成后，需要修改 Obsidian Flybook 插件以支持代理配置。请参考相关文档进行插件修改。
+代理服务器搭建完成后，需要在 Obsidian Flybook 插件设置中配置代理地址。请使用服务器的 IPv6 地址（用于 Obsidian 访问）和确保 IPv4 地址已添加到飞书白名单（用于飞书 API 通信）。

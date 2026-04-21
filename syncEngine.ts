@@ -145,7 +145,7 @@ export class SyncEngine {
 
   /**
    * 上传单个文件（不处理子文件夹）
-   * 使用飞书文档导入方式同步 Markdown 文件
+   * 使用飞书普通文件上传方式同步文件
    */
   private async uploadSingleFile(file: TFile, parentFolderToken: string): Promise<void> {
     // 判断是否为二进制文件格式
@@ -166,8 +166,10 @@ export class SyncEngine {
       throw new Error(`读取文件失败: ${(error as Error).message}`);
     }
 
+    // 计算文件大小
+    const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
+    
     // 检查文件大小
-    const fileSize = content instanceof ArrayBuffer ? content.byteLength : (content as string).length;
     if (!this.apiClient.checkFileSize(fileSize)) {
       throw new Error(`文件大小超过20MB限制`);
     }
@@ -182,42 +184,39 @@ export class SyncEngine {
     try {
       existingFile = await this.apiClient.findFileByName(documentTitle, parentFolderToken);
     } catch (error) {
-      console.warn(`[Flybook] 检查云端文件存在性失败，继续创建新文件:`, error);
+      console.warn(`[Flybook] 检查云端文件存在性失败，继续上传新文件:`, error);
     }
 
     try {
       if (existingFile) {
-        // 文件已存在，更新文档内容
-        console.log(`[Flybook] 云端已存在同名文档 ${documentTitle}，token: ${existingFile.token}，开始更新内容...`);
+        // 文件已存在，删除旧文件后重新上传
+        console.log(`[Flybook] 云端已存在同名文件 ${documentTitle}，token: ${existingFile.token}，类型: ${existingFile.type}，删除旧文件后重新上传...`);
         
-        // 将 Markdown 内容转换为 blocks
-        const blocks = this.apiClient.markdownToBlocks(content as string);
-        
-        // 更新文档内容
-        await this.apiClient.updateDocumentContent(existingFile.token, blocks);
-        console.log(`[Flybook] 文档 ${documentTitle} 内容更新成功`);
-      } else {
-        // 文件不存在，创建新文档
-        console.log(`[Flybook] 云端不存在同名文档，开始导入新文档: ${documentTitle}`);
-        
-        const docToken = await this.apiClient.importFileAsDocument(
-          content,
-          file.name,
-          parentFolderToken
-        );
-        console.log(`[Flybook] 文档导入成功，token: ${docToken}`);
-
-        // 如果有目标文件夹，将导入的文档移动到目标文件夹
-        if (parentFolderToken) {
-          try {
-            console.log(`[Flybook] 准备移动文档 ${docToken} 到文件夹 ${parentFolderToken}`);
-            await this.apiClient.moveFile(docToken, 'docx', parentFolderToken);
-            console.log(`[Flybook] 文档已移动到目标文件夹: ${parentFolderToken}`);
-          } catch (moveError) {
-            console.warn(`[Flybook] 移动文档到目标文件夹失败:`, moveError);
-          }
+        try {
+          // 传递文件的实际类型（如 'file', 'docx', 'sheet' 等）
+          await this.apiClient.deleteFile(existingFile.token, existingFile.type);
+          console.log(`[Flybook] 旧文件已删除`);
+        } catch (deleteError) {
+          console.warn(`[Flybook] 删除旧文件失败，继续上传新版本:`, deleteError);
         }
       }
+      
+      // 上传文件（使用普通文件上传方式，parent_type 为 'explorer'）
+      console.log(`[Flybook] 开始上传文件到文件夹 ${parentFolderToken}...`);
+      
+      // 将字符串内容转换为 ArrayBuffer
+      const fileBuffer = content instanceof ArrayBuffer 
+        ? content 
+        : new TextEncoder().encode(content as string).buffer;
+      
+      const fileToken = await this.apiClient.uploadFile(
+        new Uint8Array(fileBuffer),
+        file.name,
+        parentFolderToken,
+        fileSize
+      );
+      
+      console.log(`[Flybook] 文件上传成功，token: ${fileToken}`);
     } catch (error) {
       console.error(`[Flybook] 同步文件 ${file.name} 失败:`, error);
       throw error;

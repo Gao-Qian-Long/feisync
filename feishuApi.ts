@@ -344,8 +344,10 @@ export class FeishuApiClient {
 
   /**
    * 删除文件
+   * @param fileToken 文件的 token
+   * @param fileType 文件类型（如 'file', 'folder', 'docx' 等）
    */
-  async deleteFile(fileToken: string): Promise<void> {
+  async deleteFile(fileToken: string, fileType: string = 'file'): Promise<void> {
     // 输入校验
     if (!fileToken || fileToken.trim() === '') {
       throw new Error('文件 token 不能为空');
@@ -353,7 +355,10 @@ export class FeishuApiClient {
 
     try {
       const headers = await this.getHeaders();
-      const endpoint = this.getApiUrl(`/open-apis/drive/v1/files/${fileToken}`);
+      // 飞书删除文件 API 需要 type 查询参数
+      const endpoint = this.getApiUrl(`/open-apis/drive/v1/files/${fileToken}?type=${fileType}`);
+
+      console.log(`[Flybook] 删除文件: ${fileToken}, 类型: ${fileType}`);
 
       const data = await this.fetchWithTimeout(endpoint, {
         method: 'DELETE',
@@ -363,6 +368,8 @@ export class FeishuApiClient {
       if (data.code !== 0) {
         throw new Error(`删除文件失败: ${data.msg}`);
       }
+      
+      console.log(`[Flybook] 文件删除成功`);
     } catch (error) {
       console.error('[Flybook] 删除文件失败:', error);
       throw error;
@@ -375,7 +382,15 @@ export class FeishuApiClient {
   async findFileByName(fileName: string, parentToken: string): Promise<FeishuFileMeta | null> {
     try {
       const files = await this.listFolderContents(parentToken);
-      return files.find(f => f.name === fileName && f.type === 'file') || null;
+      
+      // 去掉本地文件名的扩展名（飞书文档名称通常不带扩展名）
+      const localNameWithoutExt = fileName.replace(/\.[^.]+$/, '');
+      
+      // 优先精确匹配，其次匹配不带扩展名的版本
+      return files.find(f => 
+        (f.name === fileName || f.name === localNameWithoutExt) && 
+        (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
+      ) || null;
     } catch (error) {
       console.error('[Flybook] 查找文件失败:', error);
       return null;
@@ -448,8 +463,9 @@ export class FeishuApiClient {
    * 批量插入文档内容块
    * @param docToken 文档 token
    * @param blocks 要插入的 blocks 数组
+   * @param parentBlockId 父块的 ID（通常是文档的根块 ID），默认为文档 token
    */
-  async insertDocumentBlocks(docToken: string, blocks: any[]): Promise<void> {
+  async insertDocumentBlocks(docToken: string, blocks: any[], parentBlockId?: string): Promise<void> {
     if (!docToken || docToken.trim() === '') {
       throw new Error('文档 token 不能为空');
     }
@@ -459,12 +475,19 @@ export class FeishuApiClient {
 
     try {
       const headers = await this.getHeaders();
-      const endpoint = this.getApiUrl(`/open-apis/doc/v1/documents/${docToken}/blocks/batch_create`);
+      // 正确的 API 路径：POST /open-apis/docx/v1/documents/:document_id/blocks/:block_id/children
+      // 如果没有指定 parentBlockId，使用文档 token 作为父块 ID（在文档根节点下创建）
+      const blockId = parentBlockId || docToken;
+      const endpoint = this.getApiUrl(`/open-apis/docx/v1/documents/${docToken}/blocks/${blockId}/children`);
 
+      // 正确的请求体格式：使用 children 数组和 index 参数
       const body = {
-        blocks: blocks,
-        index: -1  // 在文档末尾插入
+        index: -1,  // -1 表示在末尾插入
+        children: blocks
       };
+
+      console.log(`[Flybook] 插入块请求到: ${endpoint}`);
+      console.log(`[Flybook] 插入 ${blocks.length} 个块`);
 
       const data = await this.fetchWithTimeout(endpoint, {
         method: 'POST',
@@ -489,7 +512,7 @@ export class FeishuApiClient {
   async getDocumentBlocks(docToken: string): Promise<any[]> {
     try {
       const headers = await this.getHeaders();
-      const endpoint = this.getApiUrl(`/open-apis/doc/v1/documents/${docToken}/blocks?page_size=500`);
+      const endpoint = this.getApiUrl(`/open-apis/docx/v1/documents/${docToken}/blocks?page_size=500`);
       
       const data = await this.fetchWithTimeout(endpoint, {
         method: 'GET',
@@ -500,6 +523,9 @@ export class FeishuApiClient {
         throw new Error(`获取文档块失败: ${data.msg}`);
       }
       
+      // 调试：打印返回的数据结构
+      console.log('[Flybook] 获取文档块 API 响应:', JSON.stringify(data.data, null, 2));
+      
       return data.data?.items || [];
     } catch (error) {
       console.error('[Flybook] 获取文档块失败:', error);
@@ -508,25 +534,37 @@ export class FeishuApiClient {
   }
 
   /**
-   * 删除文档中的块
+   * 删除文档中指定父块的所有子块
    * @param docToken 文档 token
-   * @param blockIds 要删除的块 ID 数组
+   * @param parentBlockId 父块的 ID（通常是文档的根块 ID）
+   * @param childrenCount 子块数量（用于设置正确的 end_index）
    */
-  async deleteDocumentBlocks(docToken: string, blockIds: string[]): Promise<void> {
-    if (!blockIds || blockIds.length === 0) {
+  async deleteDocumentBlocks(docToken: string, parentBlockId: string, childrenCount: number = 1): Promise<void> {
+    if (!parentBlockId) {
+      console.warn('[Flybook] 父块 ID 为空，跳过删除');
       return;
     }
     
     try {
+      // 使用正确的 Content-Type
       const headers = await this.getHeaders();
-      const endpoint = this.getApiUrl(`/open-apis/doc/v1/documents/${docToken}/blocks/batch_delete`);
+      headers['Content-Type'] = 'application/json; charset=utf-8';
       
+      // 正确的 API 路径：DELETE /open-apis/docx/v1/documents/:document_id/blocks/:block_id/children/batch_delete
+      const endpoint = this.getApiUrl(`/open-apis/docx/v1/documents/${docToken}/blocks/${parentBlockId}/children/batch_delete`);
+      
+      // 飞书 API 使用 start_index 和 end_index 来指定删除范围（左闭右开）
+      // 要删除所有子块，end_index 应该等于子块数量
       const body = {
-        block_ids: blockIds,
+        start_index: 0,
+        end_index: childrenCount,  // 使用实际的子块数量
       };
       
+      console.log(`[Flybook] 发送删除请求到: ${endpoint}`);
+      console.log(`[Flybook] 删除参数: start_index=0, end_index=${childrenCount}`);
+      
       const data = await this.fetchWithTimeout(endpoint, {
-        method: 'POST',
+        method: 'DELETE',
         headers,
         body: JSON.stringify(body),
       });
@@ -534,6 +572,8 @@ export class FeishuApiClient {
       if (data.code !== 0) {
         throw new Error(`删除文档块失败: ${data.msg}`);
       }
+      
+      console.log('[Flybook] 删除文档块成功');
     } catch (error) {
       console.error('[Flybook] 删除文档块失败:', error);
       throw error;
@@ -551,21 +591,33 @@ export class FeishuApiClient {
       console.log(`[Flybook] 获取文档 ${docToken} 现有块...`);
       const existingBlocks = await this.getDocumentBlocks(docToken);
       
-      // 2. 收集需要删除的块 ID（排除文档容器本身）
-      const blockIdsToDelete = existingBlocks
-        .filter(block => block.block_id)
-        .map(block => block.block_id);
+      // 2. 找到文档的根块（page 类型，block_type=1）
+      // 根据飞书 API，block_type=1 是 page 类型，是文档的根块
+      const rootBlock = existingBlocks.find(block => block.block_type === 1);
       
-      // 3. 删除所有现有块
-      if (blockIdsToDelete.length > 0) {
-        console.log(`[Flybook] 删除 ${blockIdsToDelete.length} 个现有块...`);
-        await this.deleteDocumentBlocks(docToken, blockIdsToDelete);
+      if (!rootBlock) {
+        console.warn('[Flybook] 未找到文档根块，尝试直接插入新内容');
+        if (blocks && blocks.length > 0) {
+          await this.insertDocumentBlocks(docToken, blocks);
+        }
+        return;
       }
       
-      // 4. 插入新内容
+      console.log(`[Flybook] 文档根块 ID: ${rootBlock.block_id}, 类型: ${rootBlock.block_type}, 子块数量: ${rootBlock.children?.length || 0}`);
+      
+      // 3. 如果有子块，删除它们
+      const childrenCount = rootBlock.children?.length || 0;
+      if (childrenCount > 0) {
+        console.log(`[Flybook] 删除文档 ${childrenCount} 个现有内容块...`);
+        await this.deleteDocumentBlocks(docToken, rootBlock.block_id, childrenCount);
+      } else {
+        console.log('[Flybook] 文档没有现有内容块，跳过删除');
+      }
+      
+      // 4. 插入新内容（使用文档根块 ID 作为父块 ID）
       if (blocks && blocks.length > 0) {
-        console.log(`[Flybook] 插入 ${blocks.length} 个新块...`);
-        await this.insertDocumentBlocks(docToken, blocks);
+        console.log(`[Flybook] 插入 ${blocks.length} 个新块到根块 ${rootBlock.block_id}...`);
+        await this.insertDocumentBlocks(docToken, blocks, rootBlock.block_id);
       }
       
       console.log(`[Flybook] 文档 ${docToken} 内容更新完成`);

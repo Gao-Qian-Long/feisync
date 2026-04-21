@@ -224,9 +224,9 @@ export class FeishuAuthManager {
     
     // 请求必要的权限范围
     // drive:drive - 访问云文档/云空间
-    // docs:doc - 访问和编辑文档
+    // docx:document - 访问和编辑新版文档
     // docs:document:import - 导入文档
-    const scope = 'drive:drive docs:doc docs:document:import';
+    const scope = 'drive:drive docx:document docs:document:import';
     
     const params = new URLSearchParams({
       app_id: this.appId,
