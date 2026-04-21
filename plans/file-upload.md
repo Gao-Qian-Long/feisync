@@ -2,139 +2,164 @@
 
 ## 概述
 
-该模块负责将本地文件上传到飞书Drive的指定文件夹中。根据需求，我们以本地文件为准，覆盖云端已有文件（如果需要的话）。上传过程需要处理文件分块、重试、进度通知等。
+该模块负责将本地文件作为**普通文件**上传到飞书 Drive 的指定文件夹中。插件以本地文件为准，覆盖云端已有文件（通过删除后重新上传实现）。
 
-## 飞书API端点
+## 核心设计决策
 
-根据现有文档，我们有以下可能的端点：
+1. **上传为普通文件**：使用 `upload_all` API，`parent_type` 设为 `explorer`，文件会上传到云空间作为普通文件，而非云文档。
+2. **文件大小限制**：飞书 API 限制单个文件 ≤20MB。
+3. **覆盖策略**：如果云端存在同名文件，先删除旧文件，再上传新文件。
 
-1. **`POST /drive/v1/medias/upload_all`**：上传媒体文件（图片、视频、文件）到某个云文档中。限制：文件 ≤20MB，`parent_type` 需指定为文档类型。
-2. **分块上传**：`POST /drive/v1/medias/upload_prepare` + 分块上传 + 完成上传。适用于大文件。
-3. **导入任务**：`POST /drive/v1/import_tasks` 用于导入外部文件，可能支持更多格式。
+## API 端点
 
-但我们的目标是上传到普通文件夹（而非云文档）。可能需要使用 **“创建文件”** 接口，其中 `type` 为 `file`，并通过 `folder_token` 指定父文件夹。
-
-由于文档不全，我们假设存在一个类似 `POST /drive/v1/files` 的接口，用于在文件夹中创建文件。
-
-## 设计决策
-
-考虑到 Obsidian 笔记通常为 Markdown 文件（大小一般 <1MB），我们可以先实现简单的小文件上传（≤20MB）。若文件超过 20MB，则报错。
-
-我们选择使用 `upload_all` 端点（如果支持文件夹）或寻找更合适的 API。为了不影响设计，我们抽象出一个 **上传器接口**，便于后续替换实现。
-
-## 上传器接口
-
-```typescript
-export interface FileUploader {
-  /**
-   * 上传本地文件到飞书Drive的指定文件夹。
-   * @param localFilePath 本地文件绝对路径
-   * @param remoteFileName 远程文件名（可不同于本地文件名）
-   * @param parentFolderToken 父文件夹token
-   * @returns 上传文件的 token
-   */
-  uploadFile(
-    localFilePath: string,
-    remoteFileName: string,
-    parentFolderToken: string
-  ): Promise<string>;
-
-  /**
-   * 检查文件大小是否支持。
-   */
-  checkFileSize(sizeInBytes: number): boolean;
-}
+```
+POST https://open.feishu.cn/open-apis/drive/v1/medias/upload_all
 ```
 
-## 基于 `upload_all` 的实现
+### 请求参数
 
-假设 `upload_all` 支持将文件上传到文件夹（`parent_type: "folder"`），实现如下：
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `file_name` | string | 是 | 文件名，最大 250 字符 |
+| `parent_type` | string | 是 | 固定填 `explorer`，表示上传到云空间 |
+| `parent_node` | string | 是 | 目标文件夹的 token |
+| `size` | number | 是 | 文件大小（字节），最大 20971520（20MB） |
+| `file` | binary | 是 | 文件的二进制内容 |
+
+### 响应
+
+上传成功后，返回 `file_token`，可用于下载或获取文件元信息。
+
+## 实现
+
+### FeishuApiClient.uploadFile()
 
 ```typescript
-export class FeishuMediaUploader implements FileUploader {
-  private authManager: FeishuAuthManager;
+async uploadFile(
+  fileContent: ArrayBuffer | Uint8Array,
+  fileName: string,
+  parentFolderToken: string,
+  size: number
+): Promise<string> {
+  const token = await this.authManager.getAccessToken();
 
-  constructor(authManager: FeishuAuthManager) {
-    this.authManager = authManager;
-  }
+  const formData = new FormData();
+  formData.append('file_name', fileName);
+  formData.append('parent_type', 'explorer');  // 关键：上传为普通文件
+  formData.append('parent_node', parentFolderToken);
+  formData.append('size', size.toString());
 
-  async uploadFile(
-    localFilePath: string,
-    remoteFileName: string,
-    parentFolderToken: string
-  ): Promise<string> {
-    const token = await this.authManager.getAccessToken();
-    const fileBuffer = await fs.promises.readFile(localFilePath);
-    const size = fileBuffer.length;
+  const blob = new Blob([fileContent]);
+  formData.append('file', blob, fileName);
 
-    if (!this.checkFileSize(size)) {
-      throw new Error(`File size ${size} bytes exceeds limit 20MB`);
-    }
-
-    const formData = new FormData();
-    formData.append('file_name', remoteFileName);
-    formData.append('parent_type', 'folder'); // 假设支持
-    formData.append('parent_node', parentFolderToken);
-    formData.append('size', size.toString());
-    formData.append('file', new Blob([fileBuffer]), remoteFileName);
-
-    const response = await fetch('https://open.feishu.cn/open-apis/drive/v1/medias/upload_all', {
+  const response = await fetch(
+    this.getApiUrl('/open-apis/drive/v1/medias/upload_all'),
+    {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
-        // Content-Type 将由浏览器设置，包含 multipart/form-data 边界
       },
       body: formData,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Upload failed: ${response.status} ${errorText}`);
     }
+  );
 
-    const result = await response.json();
-    if (result.code !== 0) {
-      throw new Error(`Feishu API error: ${result.msg}`);
-    }
-
-    return result.data.file_token;
+  const data = await response.json();
+  if (data.code !== 0) {
+    throw new Error(`上传文件失败: ${data.msg}`);
   }
 
-  checkFileSize(sizeInBytes: number): boolean {
-    return sizeInBytes <= 20 * 1024 * 1024; // 20 MB
+  return data.data.file_token;
+}
+```
+
+## 文件覆盖策略
+
+由于飞书 API 不支持直接覆盖同名文件，采用以下策略：
+
+1. **查找同名文件**：调用 `listFolderContents` 获取文件夹内容，查找同名文件。
+2. **删除旧文件**：如果存在，调用 `deleteFile` 删除旧文件。
+3. **上传新文件**：调用 `uploadFile` 上传新文件。
+
+### FeishuApiClient.deleteFile()
+
+```typescript
+async deleteFile(fileToken: string, fileType: string = 'file'): Promise<void> {
+  const headers = await this.getHeaders();
+  // 注意：type 是查询参数
+  const endpoint = this.getApiUrl(
+    `/open-apis/drive/v1/files/${fileToken}?type=${fileType}`
+  );
+
+  const data = await this.fetchWithTimeout(endpoint, {
+    method: 'DELETE',
+    headers,
+  });
+
+  if (data.code !== 0) {
+    throw new Error(`删除文件失败: ${data.msg}`);
   }
 }
 ```
 
-**注意**：在 Node.js 环境中（Obsidian 插件环境），`FormData` 和 `Blob` 可能不可用。需要使用 `fs` 读取文件，并可能使用 `node-fetch` 或 `axios` 发送 multipart 请求。Obsidian 插件环境基于 Electron，提供了 `window.fetch` 和 `FormData`，因此上述代码可能可以运行。
+## 文件大小检查
+
+```typescript
+checkFileSize(sizeInBytes: number): boolean {
+  const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
+  return sizeInBytes <= MAX_SIZE;
+}
+```
+
+## 同步引擎中的使用
+
+```typescript
+private async uploadSingleFile(file: TFile, parentFolderToken: string): Promise<void> {
+  // 1. 读取文件内容
+  const content = await this.vault.read(file);
+  const fileSize = new Blob([content]).size;
+
+  // 2. 检查文件大小
+  if (!this.apiClient.checkFileSize(fileSize)) {
+    throw new Error('文件大小超过20MB限制');
+  }
+
+  // 3. 检查云端是否已存在同名文件
+  const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
+
+  if (existingFile) {
+    // 4a. 删除旧文件
+    await this.apiClient.deleteFile(existingFile.token, existingFile.type);
+  }
+
+  // 5. 上传新文件
+  const fileBuffer = new TextEncoder().encode(content).buffer;
+  await this.apiClient.uploadFile(
+    new Uint8Array(fileBuffer),
+    file.name,
+    parentFolderToken,
+    fileSize
+  );
+}
+```
+
+## 支持的文件类型
+
+插件支持以下类型的文件上传：
+
+| 类型 | 扩展名 | 读取方式 |
+|------|--------|----------|
+| 文本文件 | `md`, `txt`, `json`, `yml`, `yaml` 等 | `vault.read()` |
+| 二进制文件 | `docx`, `doc`, `xlsx`, `xls`, `pdf`, `png`, `jpg`, `gif`, `zip` 等 | `vault.readBinary()` |
 
 ## 错误处理
 
-- 网络错误：重试最多3次，每次间隔递增。
-- 令牌过期：由 `authManager` 自动刷新。
-- 文件大小超限：抛出明确错误，提示用户。
+- **文件大小超限**：抛出明确错误。
+- **网络错误**：由调用方处理重试。
+- **令牌过期**：由 `authManager` 自动刷新。
+- **删除失败**：记录警告，但继续上传新文件。
 
-## 上传进度
+## 注意事项
 
-可以为大文件提供进度提示，但鉴于小文件场景，可暂不实现。
-
-## 文件覆盖策略
-
-飞书API可能不支持直接覆盖同名文件。我们需要先检查目标文件夹中是否存在同名文件，如果存在，则可能需要先删除再上传，或使用版本更新。根据需求“以本地文件为准”，我们采用 **删除后重新上传** 的策略。
-
-因此，上传前需要调用“列出文件夹文件”接口，查找同名文件，获取其 token，然后调用“删除文件”接口。
-
-## 同步协调
-
-上传模块应与其他模块协作：
-
-1. 文件夹管理器确保目标文件夹存在。
-2. 文件扫描器获取本地文件列表。
-3. 上传器逐个上传文件。
-
-## 下一步
-
-1. 验证飞书Drive文件上传API的确切端点及参数。
-2. 实现文件删除、列出文件的辅助方法。
-3. 集成到同步引擎中。
-4. 编写测试。
+1. **使用 user_access_token**：优先使用用户令牌上传，文件会存储在用户的个人云空间。
+2. **代理支持**：如果配置了代理服务器，所有请求通过代理转发。
+3. **上传频率限制**：飞书 API 限制 5 QPS，10000 次/天。

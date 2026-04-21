@@ -1,114 +1,153 @@
-# 飞书Drive文件夹管理模块设计
+# 飞书 Drive 文件夹管理模块设计
 
 ## 概述
 
-该模块负责在飞书Drive中创建、列出、查找文件夹，并维护本地路径与飞书文件夹token之间的映射关系。
+该模块负责在飞书 Drive 中创建、列出、查找文件夹，并维护本地路径与飞书文件夹 token 之间的映射关系。
 
 ## 核心概念
 
-- **飞书Drive根文件夹**：每个用户/租户有一个云空间，其中包含文件和文件夹。根文件夹的token可能是固定的（例如`0`或空值）。我们假设可以通过某个API获取根文件夹的列表。
-- **文件夹token**：每个文件夹有一个唯一的标识符（如`fldcnxxxxxxxxx`），用于在API中引用。
-- **路径映射**：插件需要将本地文件夹路径映射到飞书Drive中的文件夹token，以便在上传文件时确定父目录。
+- **飞书 Drive 根文件夹**：每个用户/租户有一个云空间，其中包含文件和文件夹。
+- **文件夹 token**：每个文件夹有一个唯一的标识符（如 `fldcnxxxxxxxxx`），用于在 API 中引用。
+- **路径映射**：插件需要将本地文件夹路径映射到飞书 Drive 中的文件夹 token，以便在上传文件时确定父目录。
 
-## 假设的API
+## API 端点
 
-根据飞书开放平台文档，我们假设存在以下API端点（具体细节可能需要后续验证）：
+### 1. 获取根文件夹元数据
 
-1. **创建文件夹**：`POST /open-apis/drive/v1/files` 或类似，参数包含 `type: "folder"`、`name`、`parent_token`。
-2. **列出文件夹内容**：`GET /open-apis/drive/v1/files/:folder_token/children` 或类似。
-3. **搜索文件夹**：通过文件名和父token查找现有文件夹。
+```
+GET https://open.feishu.cn/open-apis/drive/explorer/v2/root_folder/meta
+```
 
-由于文档未明确，我们将设计一个抽象层，允许以后替换具体的API实现。
+返回根文件夹的 token、ID 和所有者信息。
 
-## 文件夹管理器类
+### 2. 列出文件夹内容
+
+```
+GET https://open.feishu.cn/open-apis/drive/v1/files?folder_token={folderToken}
+```
+
+返回指定文件夹中的文件和文件夹列表。
+
+### 3. 创建文件夹
+
+```
+POST https://open.feishu.cn/open-apis/drive/v1/files/create_folder
+```
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `name` | string | 是 | 文件夹名称 |
+| `folder_token` | string | 是 | 父文件夹 token，为空表示根目录 |
+
+## 实现
+
+### FeishuApiClient
+
+#### listFolderContents()
+
+列出指定文件夹的内容：
 
 ```typescript
-export interface FeishuFolder {
-  token: string;
-  name: string;
-  type: 'folder' | 'file';
-  parentToken?: string;
-}
+async listFolderContents(folderToken: string): Promise<FeishuFileMeta[]> {
+  const path = folderToken
+    ? `/open-apis/drive/v1/files?folder_token=${folderToken}`
+    : '/open-apis/drive/v1/files';
+  
+  const data = await this.fetchWithTimeout(
+    this.getApiUrl(path),
+    { method: 'GET', headers: await this.getHeaders() }
+  );
 
-export class FeishuFolderManager {
-  private authManager: FeishuAuthManager;
-
-  constructor(authManager: FeishuAuthManager) {
-    this.authManager = authManager;
-  }
-
-  /**
-   * 确保飞书Drive中存在与本地路径对应的文件夹结构。
-   * @param localPath 本地相对路径（例如 'Notes/Projects'）
-   * @param rootFolderToken 飞书根文件夹token（如果未提供，使用默认根文件夹）
-   * @returns 最深层文件夹的token
-   */
-  async ensureFolderPath(localPath: string, rootFolderToken?: string): Promise<string> {
-    const parts = localPath.split('/').filter(p => p.trim() !== '');
-    let currentToken = rootFolderToken || await this.getDefaultRootFolderToken();
-
-    for (const part of parts) {
-      currentToken = await this.findOrCreateFolder(part, currentToken);
-    }
-    return currentToken;
-  }
-
-  /**
-   * 在父文件夹下查找或创建子文件夹。
-   */
-  private async findOrCreateFolder(folderName: string, parentToken: string): Promise<string> {
-    const existing = await this.findFolderByName(folderName, parentToken);
-    if (existing) {
-      return existing.token;
-    }
-    return await this.createFolder(folderName, parentToken);
-  }
-
-  /**
-   * 根据名称和父token查找文件夹。
-   */
-  private async findFolderByName(folderName: string, parentToken: string): Promise<FeishuFolder | null> {
-    // 实现：调用列出文件夹内容的API，遍历查找匹配名称的文件夹
-    // 暂定返回 null
-    return null;
-  }
-
-  /**
-   * 创建文件夹。
-   */
-  private async createFolder(folderName: string, parentToken: string): Promise<string> {
-    // 实现：调用飞书创建文件夹API
-    // 返回新文件夹的token
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * 获取默认根文件夹token（例如用户云空间的根）。
-   */
-  private async getDefaultRootFolderToken(): Promise<string> {
-    // 实现：调用API获取根文件夹token，或使用预设值（如空字符串表示根）
-    // 如果用户设置了自定义根文件夹token，则返回该值
-    return '';
-  }
+  return data.data.files.map((f: any) => ({
+    token: f.token || f.file_token,
+    name: f.name,
+    type: f.type,
+    parentToken: folderToken,
+  }));
 }
 ```
 
-## 集成到同步引擎
+#### createFolder()
 
-同步引擎在开始同步前，先调用 `ensureFolderPath` 获取目标文件夹token，然后在该文件夹下上传文件。
+创建新文件夹：
+
+```typescript
+async createFolder(folderName: string, parentToken: string): Promise<string> {
+  const body = {
+    name: folderName,
+    folder_token: parentToken || '',
+  };
+
+  const data = await this.fetchWithTimeout(
+    this.getApiUrl('/open-apis/drive/v1/files/create_folder'),
+    {
+      method: 'POST',
+      headers: await this.getHeaders(),
+      body: JSON.stringify(body),
+    }
+  );
+
+  return data.data.file_token;
+}
+```
+
+#### findFolderByName()
+
+根据名称和父 token 查找文件夹：
+
+```typescript
+async findFolderByName(folderName: string, parentToken: string): Promise<FeishuFileMeta | null> {
+  const files = await this.listFolderContents(parentToken);
+  return files.find(f => f.name === folderName && f.type === 'folder') || null;
+}
+```
+
+#### ensureFolderPath()
+
+确保目标文件夹路径存在，如果不存在则创建：
+
+```typescript
+async ensureFolderPath(folderPath: string, rootFolderToken?: string): Promise<string> {
+  const parts = folderPath.split('/').filter(p => p.trim() !== '');
+  let currentToken = rootFolderToken || '';
+
+  for (const part of parts) {
+    currentToken = await this.findOrCreateFolder(part, currentToken);
+  }
+
+  return currentToken;
+}
+```
+
+## 文件夹映射策略
+
+1. **同步开始时**：扫描本地文件夹结构。
+2. **确保路径存在**：调用 `ensureFolderPath` 确保每个子文件夹在飞书中存在。
+3. **获取目标 token**：返回最深层文件夹的 token，用于上传文件。
+
+## 示例流程
+
+```
+本地路径：Notes/Projects/MyNotes
+目标根文件夹：OShLfop5RlvFhsdmkZsclnmonP6
+```
+
+1. 调用 `ensureFolderPath('Notes/Projects/MyNotes', 'OShLfop5RlvFhsdmkZsclnmonP6')`
+2. 检查/创建 `Notes` 文件夹 → token: `xxx`
+3. 在 `xxx` 下检查/创建 `Projects` 文件夹 → token: `yyy`
+4. 在 `yyy` 下检查/创建 `MyNotes` 文件夹 → token: `zzz`
+5. 返回 `zzz`，用于上传文件
 
 ## 错误处理
 
-- 文件夹创建失败：可能是权限不足、名称重复或网络问题。应抛出错误并通知用户。
-- 文件夹查找失败：假设文件夹不存在，则创建。
+- **文件夹创建失败**：可能是权限不足、名称重复或网络问题。
+- **文件夹查找失败**：假设文件夹不存在，尝试创建。
 
-## 缓存
+## 缓存策略
 
-为了提高性能，可以将已创建的文件夹token缓存到内存中（映射：本地路径 -> token）。Obsidian插件重启后缓存失效，需要重新创建文件夹（但飞书Drive中已存在的文件夹会被重复创建吗？）。为了避免重复创建，我们可以在每次同步时先尝试查找现有文件夹。
+为了减少 API 调用，可以将已创建的文件夹 token 缓存到内存中。但考虑到同步频率不高，且飞书 API 有速率限制，暂不实现复杂缓存。
 
-## 下一步
+## 注意事项
 
-1. 查阅飞书Drive API 官方文档，确认创建文件夹和列出文件夹的具体端点。
-2. 实现 `findFolderByName` 和 `createFolder` 方法。
-3. 编写单元测试（如果项目包含测试）。
-4. 在主插件中集成文件夹管理器。
+1. **使用 user_access_token**：使用用户令牌操作用户个人云空间中的文件夹。
+2. **父文件夹权限**：用户需要对目标文件夹有编辑权限。

@@ -1,163 +1,197 @@
-# 本地文件监控与同步触发设计
+# 本地文件监控模块设计
 
 ## 概述
 
-该模块负责监控用户指定的本地文件夹，当文件发生变化（创建、修改、删除、重命名）时，自动或手动触发同步到飞书Drive。根据需求，用户可以选择开启“自动同步”或仅手动触发。
+该模块负责监控用户指定的本地文件夹，当文件发生变化（创建、修改、删除、重命名）时，自动触发同步到飞书 Drive。
 
 ## Obsidian 事件系统
 
-Obsidian 提供了 `Vault` 事件，可以通过 `this.app.vault.on(event, callback)` 监听。相关事件包括：
+Obsidian 提供了 `Vault` 事件，可通过 `this.app.vault.on(event, callback)` 监听：
 
-- `'create'`：文件或文件夹创建。
-- `'modify'`：文件内容修改。
-- `'delete'`：文件或文件夹删除。
-- `'rename'`：文件或文件夹重命名。
+| 事件 | 说明 |
+|------|------|
+| `create` | 文件或文件夹创建 |
+| `modify` | 文件内容修改 |
+| `delete` | 文件或文件夹删除 |
+| `rename` | 文件或文件夹重命名 |
 
-我们可以监听这些事件，但需要过滤出用户配置的文件夹内的变化。
+## 实现
 
-## 设计
-
-### 文件监控器类
+### FileWatcher 类
 
 ```typescript
-import { Vault, TAbstractFile } from 'obsidian';
-
 export class FileWatcher {
   private plugin: FlybookPlugin;
-  private watchedPath: string; // 配置的本地文件夹路径（相对仓库根目录）
+  private watchedPath: string = '';  // 监控的本地文件夹路径
   private isEnabled: boolean = false;
-  private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
+  private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private vault: Vault;
+
+  // 事件处理函数绑定
+  private handleCreate = this.onFileCreate.bind(this);
+  private handleModify = this.onFileModify.bind(this);
+  private handleDelete = this.onFileDelete.bind(this);
+  private handleRename = this.onFileRename.bind(this);
 
   constructor(plugin: FlybookPlugin) {
     this.plugin = plugin;
+    this.vault = plugin.app.vault;
   }
 
   /**
-   * 更新监控配置（当设置变更时调用）
+   * 更新监控配置
    */
-  updateConfig(watchedPath: string, autoSync: boolean) {
+  updateConfig(watchedPath: string, enabled: boolean): void {
     this.stop();
     this.watchedPath = watchedPath;
-    this.isEnabled = autoSync;
-    if (this.isEnabled && watchedPath) {
+    this.isEnabled = enabled;
+    if (this.isEnabled && this.watchedPath) {
       this.start();
     }
   }
 
-  private start() {
-    const { vault } = this.plugin.app;
-    // 监听所有事件，但过滤路径
-    vault.on('create', this.handleCreate.bind(this));
-    vault.on('modify', this.handleModify.bind(this));
-    vault.on('delete', this.handleDelete.bind(this));
-    vault.on('rename', this.handleRename.bind(this));
+  /**
+   * 启动文件监控
+   */
+  private start(): void {
+    this.vault.on('create', this.handleCreate);
+    this.vault.on('modify', this.handleModify);
+    this.vault.on('delete', this.handleDelete);
+    this.vault.on('rename', this.handleRename);
   }
 
-  private stop() {
-    const { vault } = this.plugin.app;
-    vault.off('create', this.handleCreate);
-    vault.off('modify', this.handleModify);
-    vault.off('delete', this.handleDelete);
-    vault.off('rename', this.handleRename);
-    // 清理所有防抖定时器
+  /**
+   * 停止文件监控
+   */
+  stop(): void {
+    this.vault.off('create', this.handleCreate);
+    this.vault.off('modify', this.handleModify);
+    this.vault.off('delete', this.handleDelete);
+    this.vault.off('rename', this.handleRename);
+    
+    // 清理防抖定时器
     this.debounceTimers.forEach(timer => clearTimeout(timer));
     this.debounceTimers.clear();
   }
 
+  /**
+   * 检查文件是否在监控路径内
+   */
   private isInWatchedPath(file: TAbstractFile): boolean {
     if (!this.watchedPath) return false;
-    const relativePath = this.plugin.app.vault.getRelativePath(file);
-    return relativePath.startsWith(this.watchedPath + '/') || relativePath === this.watchedPath;
+    
+    const normalizedPath = file.path.replace(/\\/g, '/');
+    const normalizedWatched = this.watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
+    
+    return normalizedPath === normalizedWatched || 
+           normalizedPath.startsWith(normalizedWatched + '/');
   }
 
-  private handleCreate(file: TAbstractFile) {
+  /**
+   * 文件创建事件
+   */
+  private onFileCreate(file: TAbstractFile): void {
     if (!this.isInWatchedPath(file)) return;
-    if (file instanceof TFolder) {
-      // 文件夹创建，暂时忽略（因为同步可能只需要文件）
-      return;
-    }
+    if (file instanceof TFolder) return;  // 忽略文件夹
     this.scheduleSync('create', file.path);
   }
 
-  private handleModify(file: TAbstractFile) {
+  /**
+   * 文件修改事件
+   */
+  private onFileModify(file: TAbstractFile): void {
     if (!this.isInWatchedPath(file)) return;
+    if (file instanceof TFolder) return;
     this.scheduleSync('modify', file.path);
   }
 
-  private handleDelete(file: TAbstractFile) {
+  /**
+   * 文件删除事件
+   */
+  private onFileDelete(file: TAbstractFile): void {
     if (!this.isInWatchedPath(file)) return;
     this.scheduleSync('delete', file.path);
   }
 
-  private handleRename(file: TAbstractFile, oldPath: string) {
-    // 重命名视为删除旧路径 + 创建新路径（如果新路径在监控范围内）
+  /**
+   * 文件重命名事件
+   */
+  private onFileRename(file: TAbstractFile, oldPath: string): void {
     if (this.isInWatchedPath(file)) {
       this.scheduleSync('rename', oldPath, file.path);
     }
   }
 
   /**
-   * 防抖调度同步，避免短时间内多次变化导致重复上传。
-   * 延迟时间可从设置中读取（默认5秒）。
+   * 防抖调度同步
    */
-  private scheduleSync(action: string, ...paths: string[]) {
+  private scheduleSync(action: string, ...paths: string[]): void {
     const key = paths.join('|');
+    
     if (this.debounceTimers.has(key)) {
       clearTimeout(this.debounceTimers.get(key)!);
     }
-    const delay = this.plugin.settings.syncInterval * 1000 * 60; // 分钟转毫秒
-    const timer = setTimeout(() => {
+    
+    const delayMs = this.plugin.settings.syncInterval * 60 * 1000;
+    
+    const timer = setTimeout(async () => {
       this.debounceTimers.delete(key);
-      this.triggerSync();
-    }, delay);
+      await this.plugin.sync();
+    }, delayMs);
+    
     this.debounceTimers.set(key, timer);
   }
 
   /**
-   * 触发同步（实际执行同步逻辑）
+   * 立即触发同步
    */
-  private async triggerSync() {
-    // 调用插件的同步方法
+  async triggerImmediateSync(): Promise<void> {
+    this.debounceTimers.forEach(timer => clearTimeout(timer));
+    this.debounceTimers.clear();
     await this.plugin.sync();
   }
 }
 ```
 
-## 手动同步触发
+## 防抖策略
 
-除了自动监听，插件还应提供手动同步触发方式：
+为了避免频繁触发同步，使用防抖机制：
 
-1. **命令（Command）**：注册一个 Obsidian 命令，用户可以通过命令面板执行“Flybook: Sync now”。
-2. ** ribbon 按钮**：在左侧 ribbon 添加一个图标按钮，点击触发同步。
-3. **设置界面按钮**：如之前设计。
+- **延迟时间**：由设置中的 `syncInterval` 控制（分钟转毫秒）
+- **按路径防抖**：同一文件的多次变化只触发一次同步
+- **自动取消**：新变化会取消旧的待处理同步
 
-## 同步逻辑
+## 与插件集成
 
-`plugin.sync()` 方法负责协调整个同步过程：
+```typescript
+// main.ts
+async onload(): Promise<void> {
+  // 初始化文件监控器
+  this.fileWatcher = new FileWatcher(this);
+  
+  // 如果设置了自动同步，则启动监控
+  if (this.settings.autoSyncOnChange && this.settings.localFolderPath) {
+    this.fileWatcher.updateConfig(this.settings.localFolderPath, true);
+  }
+}
 
-1. 扫描本地文件夹，获取文件列表。
-2. 与飞书Drive中已存在的文件列表比较（可能需要缓存）。
-3. 对于本地新增或修改的文件，上传到飞书。
-4. 对于本地删除的文件，删除飞书上的对应文件（根据需求，暂不实现删除同步？用户需求“以本地文件为准”，但未要求删除同步。可配置）。
-5. 记录同步结果，通知用户。
+async onunload(): Promise<void> {
+  // 停止监控
+  this.fileWatcher?.stop();
+}
 
-## 冲突处理
+// 设置变更时更新监控配置
+toggleFileWatcher(enable: boolean): void {
+  if (enable) {
+    this.fileWatcher?.updateConfig(this.settings.localFolderPath, true);
+  } else {
+    this.fileWatcher?.stop();
+  }
+}
+```
 
-由于需求规定“以本地文件为准”，我们总是用本地文件覆盖云端文件。如果云端存在本地没有的文件，则忽略（不同步删除）。
+## 注意事项
 
-## 性能考虑
-
-- 防抖：避免频繁同步，尤其是快速连续修改时。
-- 增量同步：记录文件最后修改时间，仅同步修改时间晚于上次同步时间的文件。
-- 缓存：缓存飞书文件夹结构和文件token，减少API调用。
-
-## 用户通知
-
-使用 Obsidian 的 `Notice` 类显示同步进度和结果。
-
-## 下一步
-
-1. 在插件主类中集成 FileWatcher。
-2. 实现 `sync()` 方法，协调文件夹管理器和文件上传器。
-3. 添加 Obsidian 命令和 ribbon 按钮。
-4. 测试文件监听和同步触发。
+1. **文件夹创建/删除**：目前忽略文件夹事件，仅同步文件。
+2. **同步范围**：仅监控 `localFolderPath` 配置的文件夹及其子文件夹。
+3. **性能考虑**：防抖机制避免频繁同步。

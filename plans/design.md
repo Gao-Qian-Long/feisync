@@ -1,5 +1,9 @@
 # Obsidian-Flybook 插件设计文档
 
+## 概述
+
+Obsidian-Flybook 插件将本地 Obsidian 笔记作为**普通文件**同步到飞书 Drive，实现备份和多端访问。插件以本地文件为准，单向同步。
+
 ## 设置界面设计
 
 ### 设置字段
@@ -8,38 +12,19 @@
 |--------|------|------|--------|
 | `appId` | 文本输入 | 飞书开放平台应用的 App ID | 空 |
 | `appSecret` | 文本输入（密码类型） | 飞书开放平台应用的 App Secret | 空 |
+| `proxyUrl` | 文本输入 | 代理服务器地址（用于中转 API 请求） | 空 |
 | `localFolderPath` | 文本输入 | 本地需要同步的文件夹路径（相对于 Obsidian 仓库根目录） | 空 |
 | `feishuRootFolderToken` | 文本输入 | 飞书 Drive 中目标根文件夹的 token（可选）。如果为空，插件将在用户的云空间根目录下创建名为 "ObsidianSync" 的文件夹。 | 空 |
 | `autoSyncOnChange` | 开关 | 是否在本地文件变化时自动同步 | `false` |
 | `syncInterval` | 数字输入 | 自动同步间隔（分钟），仅当 `autoSyncOnChange` 开启时有效 | `5` |
 
-### 设置界面布局
-
-1. **凭证配置区域**
-   - App ID
-   - App Secret
-   - 说明文字：如何获取这些凭证的链接（引导用户到飞书开放平台）
-
-2. **文件夹配置区域**
-   - 本地文件夹路径（支持浏览按钮？Obsidian 暂无原生文件夹选择器，可考虑使用文本输入 + 路径验证）
-   - 飞书目标文件夹 token（高级设置）
-
-3. **同步行为区域**
-   - 自动同步开关
-   - 同步间隔
-
-4. **操作按钮**
-   - “测试连接”按钮：验证凭证有效性并获取 tenant_access_token
-   - “手动同步”按钮：立即执行一次同步
-
 ### 设置存储
-
-使用 Obsidian 插件的 `loadData` / `saveData` API 存储设置对象。
 
 ```typescript
 interface FlybookPluginSettings {
   appId: string;
   appSecret: string;
+  proxyUrl: string;           // 代理服务器地址
   localFolderPath: string;
   feishuRootFolderToken: string;
   autoSyncOnChange: boolean;
@@ -47,137 +32,119 @@ interface FlybookPluginSettings {
 }
 ```
 
-### 设置选项卡示例代码
+## 插件架构
 
-```typescript
-import { App, PluginSettingTab, Setting } from 'obsidian';
-import FlybookPlugin from './main';
-
-export class FlybookSettingTab extends PluginSettingTab {
-  plugin: FlybookPlugin;
-
-  constructor(app: App, plugin: FlybookPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    // 凭证配置
-    new Setting(containerEl)
-      .setName('飞书 App ID')
-      .setDesc('在飞书开放平台创建应用后获得的 App ID')
-      .addText(text => text
-        .setPlaceholder('cli_xxxxxxxx')
-        .setValue(this.plugin.settings.appId)
-        .onChange(async (value) => {
-          this.plugin.settings.appId = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(containerEl)
-      .setName('飞书 App Secret')
-      .setDesc('对应的 App Secret，请妥善保管')
-      .addText(text => text
-        .setPlaceholder('xxxxxxxxxxxxxxxx')
-        .setValue(this.plugin.settings.appSecret)
-        .onChange(async (value) => {
-          this.plugin.settings.appSecret = value;
-          await this.plugin.saveSettings();
-        }));
-
-    // 本地文件夹路径
-    new Setting(containerEl)
-      .setName('本地同步文件夹')
-      .setDesc('相对于仓库根目录的路径，例如 "Notes"')
-      .addText(text => text
-        .setPlaceholder('Notes')
-        .setValue(this.plugin.settings.localFolderPath)
-        .onChange(async (value) => {
-          this.plugin.settings.localFolderPath = value;
-          await this.plugin.saveSettings();
-        }));
-
-    // 飞书文件夹 token（可选）
-    new Setting(containerEl)
-      .setName('飞书目标文件夹 Token')
-      .setDesc('可选，如果不填则使用默认文件夹')
-      .addText(text => text
-        .setPlaceholder('fldcnxxxxxxxx')
-        .setValue(this.plugin.settings.feishuRootFolderToken)
-        .onChange(async (value) => {
-          this.plugin.settings.feishuRootFolderToken = value;
-          await this.plugin.saveSettings();
-        }));
-
-    // 自动同步开关
-    new Setting(containerEl)
-      .setName('自动同步')
-      .setDesc('监听本地文件变化并自动上传')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.autoSyncOnChange)
-        .onChange(async (value) => {
-          this.plugin.settings.autoSyncOnChange = value;
-          await this.plugin.saveSettings();
-          // 动态启停文件监听器
-          this.plugin.toggleFileWatcher(value);
-        }));
-
-    // 同步间隔（仅当自动同步开启时显示）
-    if (this.plugin.settings.autoSyncOnChange) {
-      new Setting(containerEl)
-        .setName('同步间隔（分钟）')
-        .setDesc('两次自动同步的最小时间间隔')
-        .addText(text => text
-          .setPlaceholder('5')
-          .setValue(this.plugin.settings.syncInterval.toString())
-          .onChange(async (value) => {
-            const num = parseInt(value, 10);
-            if (!isNaN(num) && num > 0) {
-              this.plugin.settings.syncInterval = num;
-              await this.plugin.saveSettings();
-            }
-          }));
-    }
-
-    // 测试连接按钮
-    new Setting(containerEl)
-      .setName('测试连接')
-      .setDesc('验证凭证并获取飞书访问令牌')
-      .addButton(button => button
-        .setButtonText('测试')
-        .onClick(async () => {
-          const success = await this.plugin.testConnection();
-          if (success) {
-            new Notice('连接成功，令牌有效');
-          } else {
-            new Notice('连接失败，请检查凭证');
-          }
-        }));
-
-    // 手动同步按钮
-    new Setting(containerEl)
-      .setName('手动同步')
-      .setDesc('立即执行一次同步')
-      .addButton(button => button
-        .setButtonText('同步')
-        .onClick(async () => {
-          await this.plugin.sync();
-        }));
-  }
-}
 ```
+┌─────────────────────────────────────────────────────────────┐
+│                      FlybookPlugin                          │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐                  │
+│  │  FeishuAuthManager  │  │  FeishuApiClient   │                  │
+│  │  - tenant_access_token │  │  - uploadFile()     │                  │
+│  │  - user_access_token  │  │  - deleteFile()     │                  │
+│  │  - 令牌缓存与刷新      │  │  - listFolder()     │                  │
+│  └─────────────────┘  │  - createFolder()   │                  │
+│                      └─────────────────┘                  │
+│  ┌─────────────────┐  ┌─────────────────┐                  │
+│  │   FileWatcher    │  │   SyncEngine     │                  │
+│  │  - 监听文件变化   │  │  - 扫描本地文件   │                  │
+│  │  - 防抖调度      │  │  - 协调上传       │                  │
+│  └─────────────────┘  └─────────────────┘                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 模块说明
+
+### 1. FeishuAuthManager（认证管理）
+
+- 获取并缓存 `tenant_access_token`
+- 管理 `user_access_token`（用户授权）
+- 自动刷新过期令牌
+- 支持代理服务器
+
+### 2. FeishuApiClient（API 客户端）
+
+- **文件操作**：`uploadFile()`, `deleteFile()`, `findFileByName()`
+- **文件夹操作**：`listFolderContents()`, `createFolder()`, `ensureFolderPath()`
+- 所有 API 调用通过 FeishuAuthManager 获取令牌
+
+### 3. FileWatcher（文件监控）
+
+- 监听 Obsidian Vault 的文件变化事件
+- 防抖调度同步，避免频繁触发
+- 支持启动/停止控制
+
+### 4. SyncEngine（同步引擎）
+
+- 扫描本地文件夹
+- 确保飞书目标文件夹存在
+- 逐个上传/更新文件
+
+## 同步流程
+
+```
+1. 扫描本地文件夹
+   ↓
+2. 获取/创建飞书目标文件夹
+   ↓
+3. 遍历本地文件
+   ├─ 检查云端是否存在同名文件
+   │  └─ 存在 → 删除旧文件
+   └─ 上传新文件
+```
+
+## 代理服务器支持
+
+由于飞书 API 不支持 CORS，插件需要通过代理服务器中转请求。
+
+### 代理 URL 配置
+
+```
+http://[服务器IPv6地址]:8080
+```
+
+### 代理服务器要求
+
+- 支持 HTTP 反向代理
+- 支持 DELETE 方法（文件删除 API）
+- 正确的 CORS 头配置
+
+详见：`plans/proxy-server-setup.md`
+
+## 命令和交互
+
+### 命令面板
+
+- **Flybook: Sync now**：手动触发同步
+
+### Ribbon 图标
+
+- 点击显示菜单：
+  - 立即同步
+  - 打开设置
+
+### 通知
+
+- 同步开始/完成/失败通知
+- 错误详情通过控制台输出
+
+## 错误处理
+
+| 场景 | 处理方式 |
+|------|----------|
+| 凭证未配置 | 显示设置提示 |
+| 网络错误 | 抛出异常，显示错误消息 |
+| 文件大小超限 | 跳过文件，记录警告 |
+| 令牌过期 | 自动刷新重试 |
+
+## 数据持久化
+
+- **设置**：`plugin.loadData()` / `plugin.saveData()`
+- **用户令牌**：加密存储在 `data.json` 中
 
 ## 下一步
 
-1. 实现 `FlybookPlugin` 类，包含 `settings` 属性和 `loadSettings` / `saveSettings` 方法。
-2. 实现 `testConnection` 方法，调用飞书认证 API。
-3. 实现 `sync` 方法，遍历本地文件夹并上传文件。
-4. 实现文件变化监听器（使用 `app.vault.on('modify', ...)` 等事件）。
-
-## 参考
-
-- [Obsidian 设置界面文档](https://docs.obsidian.md/Plugins/User+interface/Settings)
-- [飞书开放平台 API 文档](https://open.feishu.cn/document/server-docs/docs/drive-v1/media/upload_all)
+1. 完善用户授权流程（OAuth）
+2. 添加下载功能（从飞书恢复文件）
+3. 支持双向同步
+4. 增量同步优化（基于修改时间）

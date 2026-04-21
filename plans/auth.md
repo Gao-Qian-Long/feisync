@@ -1,88 +1,91 @@
-# 飞书API认证模块设计
+# 飞书 API 认证模块设计
 
 ## 概述
 
-该模块负责使用飞书开放平台提供的 App ID 和 App Secret 获取 `tenant_access_token`，并管理令牌的生命周期（缓存、刷新）。所有后续的飞书API调用都需要在 `Authorization` 头中携带此令牌。
+该模块负责使用飞书开放平台获取访问令牌，支持两种认证方式：
 
-## 接口
+1. **tenant_access_token（应用访问凭证）**：以应用身份访问，文件存储在应用云空间。
+2. **user_access_token（用户访问凭证）**：以用户身份访问，文件存储在用户的个人云空间。
 
-### 认证管理器类
+## 认证方式对比
+
+| 特性 | tenant_access_token | user_access_token |
+|------|---------------------|-------------------|
+| 适用场景 | 应用云空间 | 用户个人云空间 |
+| 文件存储位置 | 应用创建的文件夹 | 用户个人文件夹 |
+| UI 可见性 | 不可见（仅 API 管理） | 可见（用户可在飞书客户端看到） |
+| 权限来源 | 应用权限 | 用户授权 + 应用权限 |
+| 刷新方式 | 自动过期刷新 | 需要用户重新授权 |
+
+## API 端点
+
+### 1. 获取 tenant_access_token
+
+```
+POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal
+```
+
+### 2. 获取 user_access_token
+
+用户授权流程（通过 OAuth 2.0）：
+1. 引导用户访问授权页面
+2. 用户授权后，获取 authorization_code
+3. 使用 code 换取 user_access_token
+
+## 实现
+
+### FeishuAuthManager
 
 ```typescript
 export class FeishuAuthManager {
   private appId: string;
   private appSecret: string;
+  private proxyUrl: string;
+  
+  // tenant_access_token 缓存
   private cachedToken: string | null = null;
-  private tokenExpiry: number | null = null; // 过期时间戳（毫秒）
+  private tokenExpiry: number | null = null;
 
-  constructor(appId: string, appSecret: string) {
+  // user_access_token
+  private userAccessToken: string | null = null;
+  private userTokenExpiry: number | null = null;
+
+  constructor(appId: string, appSecret: string, proxyUrl: string = '') {
     this.appId = appId;
     this.appSecret = appSecret;
+    this.proxyUrl = proxyUrl;
   }
 
   /**
-   * 获取有效的 tenant_access_token。
-   * 如果缓存中存在未过期的令牌，则直接返回；
-   * 否则调用飞书API获取新令牌。
+   * 获取有效的 tenant_access_token
    */
   async getAccessToken(): Promise<string> {
     if (this.isTokenValid()) {
       return this.cachedToken!;
     }
-    return await this.fetchNewToken();
+    return await this.fetchTenantToken();
   }
 
   /**
-   * 强制刷新令牌（例如凭证更改后）
+   * 获取用户访问凭证
+   * 如果已授权且未过期，直接返回；否则需要用户重新授权
    */
-  async refreshToken(): Promise<string> {
-    this.cachedToken = null;
-    this.tokenExpiry = null;
-    return await this.fetchNewToken();
-  }
-
-  /**
-   * 调用飞书认证端点获取令牌
-   */
-  private async fetchNewToken(): Promise<string> {
-    const url = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
-    const payload = {
-      app_id: this.appId,
-      app_secret: this.appSecret,
-    };
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      if (data.code !== 0) {
-        throw new Error(`Feishu API error: ${data.msg}`);
-      }
-
-      const token = data.tenant_access_token;
-      // 令牌有效期为2小时（7200秒），我们提前5分钟过期以保安全
-      this.cachedToken = token;
-      this.tokenExpiry = Date.now() + (7200 - 300) * 1000;
-
-      return token;
-    } catch (error) {
-      console.error('Failed to fetch tenant_access_token:', error);
-      throw error;
+  async getUserAccessToken(): Promise<string> {
+    if (this.isUserTokenValid()) {
+      return this.userAccessToken!;
     }
+    throw new Error('用户未授权或授权已过期');
   }
 
   /**
-   * 检查缓存令牌是否仍然有效
+   * 检查用户是否已授权
+   */
+  isUserAuthorized(): boolean {
+    return this.isUserTokenValid();
+  }
+
+  /**
+   * 检查 tenant token 是否有效
    */
   private isTokenValid(): boolean {
     if (!this.cachedToken || !this.tokenExpiry) {
@@ -92,91 +95,141 @@ export class FeishuAuthManager {
   }
 
   /**
-   * 清除缓存（用于登出或凭证更改）
+   * 检查 user token 是否有效
+   */
+  private isUserTokenValid(): boolean {
+    if (!this.userAccessToken || !this.userTokenExpiry) {
+      return false;
+    }
+    return Date.now() < this.userTokenExpiry;
+  }
+
+  /**
+   * 获取 tenant_access_token
+   */
+  private async fetchTenantToken(): Promise<string> {
+    const url = this.getApiUrl('/open-apis/auth/v3/tenant_access_token/internal');
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_id: this.appId,
+        app_secret: this.appSecret,
+      }),
+    });
+
+    const data = await response.json();
+    if (data.code !== 0) {
+      throw new Error(`获取令牌失败: ${data.msg}`);
+    }
+
+    // 令牌有效期为 2 小时（7200 秒），提前 5 分钟过期
+    this.cachedToken = data.tenant_access_token;
+    this.tokenExpiry = Date.now() + (7200 - 300) * 1000;
+
+    return this.cachedToken;
+  }
+
+  /**
+   * 获取 API URL（支持代理）
+   */
+  private getApiUrl(path: string): string {
+    if (this.proxyUrl) {
+      const baseUrl = this.proxyUrl.replace(/\/$/, '');
+      const apiPath = path.startsWith('/') ? path : '/' + path;
+      return `${baseUrl}${apiPath}`;
+    }
+    return `https://open.feishu.cn${path}`;
+  }
+
+  /**
+   * 更新凭证
+   */
+  updateCredentials(appId: string, appSecret: string, proxyUrl: string): void {
+    this.appId = appId;
+    this.appSecret = appSecret;
+    this.proxyUrl = proxyUrl;
+    this.clearCache();
+  }
+
+  /**
+   * 清除缓存
    */
   clearCache(): void {
     this.cachedToken = null;
     this.tokenExpiry = null;
+    this.userAccessToken = null;
+    this.userTokenExpiry = null;
   }
 }
 ```
 
-## 集成到主插件
+## token 选择策略
 
-主插件将持有 `FeishuAuthManager` 实例，并在需要调用飞书API时获取令牌。
-
-### 插件中的使用示例
+在调用 API 时，优先使用 user_access_token（如果已授权），否则使用 tenant_access_token：
 
 ```typescript
-import { FeishuAuthManager } from './feishuAuth';
-
-export default class FlybookPlugin extends Plugin {
-  settings: FlybookPluginSettings;
-  authManager: FeishuAuthManager | null = null;
-
-  // 在设置变更时更新 authManager
-  updateAuthManager() {
-    if (this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(
-        this.settings.appId,
-        this.settings.appSecret
-      );
-    } else {
-      this.authManager = null;
-    }
-  }
-
-  // 测试连接功能
-  async testConnection(): Promise<boolean> {
-    if (!this.authManager) {
-      return false;
-    }
+private async getHeaders(): Promise<Record<string, string>> {
+  let token: string;
+  
+  if (this.authManager.isUserAuthorized()) {
     try {
-      const token = await this.authManager.getAccessToken();
-      // 可选：调用一个简单的API验证令牌，例如查询租户信息
-      const isValid = await this.validateToken(token);
-      return isValid;
-    } catch (error) {
-      console.error('Connection test failed:', error);
-      return false;
+      token = await this.authManager.getUserAccessToken();
+    } catch {
+      // 获取用户令牌失败，回退到 tenant token
+      token = await this.authManager.getAccessToken();
+    }
+  } else {
+    token = await this.authManager.getAccessToken();
+  }
+  
+  return {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+}
+```
+
+## 令牌持久化
+
+- **tenant_access_token**：不持久化，每次启动时重新获取（有效期 2 小时足够）。
+- **user_access_token**：需要持久化，以便下次启动时恢复。使用 `plugin.loadData()` / `plugin.saveData()` 存储。
+
+```typescript
+// 恢复用户令牌
+async loadUserToken(): Promise<void> {
+  const data = await this.loadData();
+  if (data?.feshuUserToken) {
+    const tokenInfo = JSON.parse(data.feshuUserToken);
+    if (tokenInfo.expiresAt > Date.now()) {
+      this.authManager.loadUserToken(tokenInfo);
     }
   }
+}
 
-  private async validateToken(token: string): Promise<boolean> {
-    const url = 'https://open.feishu.cn/open-apis/tenant/v2/tenant/query';
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    if (!response.ok) {
-      return false;
-    }
-    const data = await response.json();
-    return data.code === 0;
+// 保存用户令牌
+async saveUserToken(): Promise<void> {
+  if (this.authManager.isUserAuthorized()) {
+    const data = await this.loadData();
+    data.feshuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
+    await this.saveData(data);
   }
 }
 ```
 
 ## 错误处理
 
-- **网络错误**：捕获 `fetch` 异常，通知用户检查网络连接。
-- **凭证错误**：飞书API返回 `code != 0` 时，提示用户检查 App ID 和 App Secret。
-- **令牌过期**：通过 `isTokenValid` 检查，自动刷新。
-
-## 配置存储
-
-AuthManager 本身不持久化令牌，因为令牌有效期较短。插件每次启动时都需要重新获取令牌（除非缓存仍在内存中）。Obsidian 插件在重启后内存状态会丢失，因此每次启动后第一次 API 调用都会触发一次令牌获取。
+| 错误类型 | 处理方式 |
+|----------|----------|
+| 网络错误 | 抛出异常，上层处理重试 |
+| 凭证错误 | 提示用户检查 App ID 和 App Secret |
+| 令牌过期 | 自动刷新 |
+| 用户未授权 | 提示用户进行授权 |
 
 ## 安全考虑
 
-- App Secret 以明文形式存储在插件设置中（Obsidian 的 `data.json` 文件中）。虽然 Obsidian 仓库通常位于用户本地，但仍需提醒用户不要公开仓库内容。
-- 令牌仅在内存中缓存，不会写入磁盘。
-- 所有 API 调用均使用 HTTPS。
-
-## 下一步
-
-1. 在 `feishuApi.ts` 中实现 AuthManager。
-2. 在主插件中集成，并在设置变更时更新 AuthManager 实例。
-3. 实现“测试连接”按钮，调用 `testConnection` 方法。
+1. **App Secret**：存储在插件设置中，用户应妥善保管。
+2. **令牌**：仅在内存中缓存，不写入磁盘（user_token 除外）。
+3. **代理**：如果使用代理，确保代理服务器可信。
+4. **HTTPS**：所有 API 调用均通过 HTTPS。
