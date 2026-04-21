@@ -4,6 +4,8 @@
  * 以及实现 user_access_token 的 OAuth 授权流程
  */
 
+import * as http from 'http';
+
 const FEISHU_AUTH_URL = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
 const FEISHU_OAUTH_URL = 'https://open.feishu.cn/open-apis/authen/v1/authorize';
 const FEISHU_TOKEN_URL = 'https://open.feishu.cn/open-apis/authen/v1/oidc/access_token';
@@ -218,7 +220,7 @@ export class FeishuAuthManager {
    * @param redirectUri 回调 URI（用户会被重定向到这个地址）
    * @returns 授权 URL
    */
-  generateOAuthUrl(redirectUri: string = 'https://open.feishu.cn'): string {
+  generateOAuthUrl(redirectUri: string = 'http://localhost:9527/callback'): string {
     // 生成随机 state 用于防止 CSRF 攻击
     this.oauthState = this.generateRandomString(32);
     
@@ -242,11 +244,108 @@ export class FeishuAuthManager {
   }
 
   /**
+   * 启动本地回调服务器，自动捕获飞书 OAuth 回调中的授权码
+   * @param port 监听端口（默认 9527）
+   * @returns 捕获到的授权码
+   */
+  async startLocalCallbackServer(port: number = 9527): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let server: http.Server | null = null;
+      let timeoutId: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        if (server) {
+          server.close(() => {
+            console.log(`[Flybook] 本地回调服务器已关闭（端口 ${port}）`);
+          });
+          server = null;
+        }
+      };
+
+      server = http.createServer((req, res) => {
+        try {
+          const reqUrl = new URL(req.url || '/', `http://localhost:${port}`);
+          const code = reqUrl.searchParams.get('code');
+          const state = reqUrl.searchParams.get('state');
+          const error = reqUrl.searchParams.get('error');
+
+          // 飞书返回了错误
+          if (error) {
+            const errorDesc = reqUrl.searchParams.get('error_description') || '未知错误';
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`<h1>授权失败</h1><p>${error}: ${errorDesc}</p><p>请返回 Obsidian 查看详情。</p>`);
+            cleanup();
+            reject(new Error(`飞书授权错误: ${error} - ${errorDesc}`));
+            return;
+          }
+
+          // 没有 code
+          if (!code) {
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<h1>授权失败</h1><p>未收到授权码，请返回 Obsidian 重试。</p>');
+            cleanup();
+            reject(new Error('未收到授权码'));
+            return;
+          }
+
+          // 校验 state，防止 CSRF
+          if (state !== this.oauthState) {
+            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<h1>授权失败</h1><p>State 校验失败，可能存在安全风险。请返回 Obsidian 重试。</p>');
+            cleanup();
+            reject(new Error('OAuth state 校验失败'));
+            return;
+          }
+
+          // 成功捕获 code
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(
+            '<h1 style="color:green">授权成功！</h1>' +
+            '<p>您已完成飞书授权，可以关闭此页面并返回 Obsidian 继续使用。</p>' +
+            '<script>setTimeout(() => window.close(), 3000)</script>'
+          );
+          cleanup();
+          resolve(code);
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<h1>服务器错误</h1><p>处理回调时发生异常，请返回 Obsidian 重试。</p>');
+          cleanup();
+          reject(err);
+        }
+      });
+
+      // 超时处理：5 分钟未收到回调则关闭服务器
+      timeoutId = setTimeout(() => {
+        cleanup();
+        reject(new Error('等待授权回调超时（5分钟），请重新尝试授权'));
+      }, 5 * 60 * 1000);
+
+      server.listen(port, () => {
+        console.log(`[Flybook] 本地回调服务器已启动，监听 http://localhost:${port}/callback`);
+      });
+
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        cleanup();
+        if (err.code === 'EADDRINUSE') {
+          reject(new Error(`端口 ${port} 已被占用，请检查是否有其他进程占用了该端口`));
+        } else {
+          reject(new Error(`启动本地回调服务器失败: ${err.message}`));
+        }
+      });
+    });
+  }
+
+  /**
    * 使用授权码获取用户访问令牌
    * @param code 授权码（用户授权后获得）
+   * @param redirectUri 授权时使用的回调地址，必须与生成 URL 时一致
    * @returns 用户令牌信息
    */
-  async exchangeCodeForUserToken(code: string): Promise<UserTokenInfo> {
+  async exchangeCodeForUserToken(code: string, redirectUri: string = 'http://localhost:9527/callback'): Promise<UserTokenInfo> {
     const url = this.getApiUrl('/open-apis/authen/v2/oauth/token');
     
     const payload = {
@@ -254,7 +353,7 @@ export class FeishuAuthManager {
       client_id: this.appId,
       client_secret: this.appSecret,
       code: code,
-      redirect_uri: 'https://open.feishu.cn',
+      redirect_uri: redirectUri,
     };
 
     console.log('[Flybook] 正在交换授权码获取用户令牌...');

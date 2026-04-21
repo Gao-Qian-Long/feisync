@@ -1,5 +1,5 @@
 import FlybookPlugin from './main';
-import { App, PluginSettingTab, Setting, Notice, TextComponent, TFolder, Modal } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, TextComponent } from 'obsidian';
 
 // 设置接口
 export interface FlybookPluginSettings {
@@ -186,12 +186,17 @@ export class FlybookSettingTab extends PluginSettingTab {
         cls: 'flybook-hint'
       });
 
+      containerEl.createEl('p', {
+        text: '提示：请先在飞书开放平台 → 应用功能 → 网页应用 中，添加回调地址 http://localhost:9527/callback',
+        cls: 'flybook-hint'
+      });
+
       // 授权按钮
       new Setting(containerEl)
         .setName('进行用户授权')
-        .setDesc('点击获取授权链接，然后在浏览器中完成授权')
+        .setDesc('点击后将在浏览器中打开授权页面，授权完成后会自动获取令牌')
         .addButton((button) => {
-          button.setButtonText('获取授权链接')
+          button.setButtonText('开始授权')
             .setCta()
             .onClick(async () => {
               try {
@@ -199,15 +204,26 @@ export class FlybookSettingTab extends PluginSettingTab {
                   new Notice('认证管理器未初始化');
                   return;
                 }
-                const oauthUrl = this.plugin.authManager.generateOAuthUrl();
-                // 打开浏览器
+
+                // 先启动本地回调服务器
+                const codePromise = this.plugin.authManager.startLocalCallbackServer(9527);
+
+                // 生成 OAuth URL（使用本地回调地址）并打开浏览器
+                const oauthUrl = this.plugin.authManager.generateOAuthUrl('http://localhost:9527/callback');
                 window.open(oauthUrl);
-                new Notice('已在浏览器中打开授权页面，请完成授权后复制返回的代码');
-                
-                // 弹出输入框让用户粘贴授权码
-                this.showOAuthCodeDialog();
+                new Notice('请在浏览器中完成飞书授权...');
+
+                // 等待本地服务器自动捕获 code
+                const code = await codePromise;
+                new Notice('已获取授权码，正在交换令牌...');
+
+                // 自动用 code 换取 token
+                await this.plugin.authManager.exchangeCodeForUserToken(code, 'http://localhost:9527/callback');
+                await this.plugin.saveUserToken();
+                new Notice('授权成功！');
+                this.display();
               } catch (error) {
-                new Notice('获取授权链接失败：' + (error as Error).message);
+                new Notice('授权失败：' + (error as Error).message);
               }
             });
         });
@@ -266,56 +282,4 @@ export class FlybookSettingTab extends PluginSettingTab {
     });
   }
 
-  /**
-   * 显示 OAuth 授权码输入对话框
-   */
-  private showOAuthCodeDialog(): void {
-    const modal = new Modal(this.plugin.app);
-    modal.titleEl.setText('输入授权码');
-    
-    const content = modal.contentEl;
-    content.createDiv({
-      text: '完成授权后，浏览器会跳转并显示授权码。请复制该授权码并粘贴到下方输入框中。',
-      cls: 'flybook-hint'
-    });
-
-    const inputEl = new TextComponent(content);
-    inputEl.inputEl.style.width = '100%';
-    inputEl.inputEl.placeholder = '粘贴授权码...';
-    inputEl.setValue('');
-
-    const buttonContainer = content.createDiv();
-    buttonContainer.style.display = 'flex';
-    buttonContainer.style.gap = '10px';
-    buttonContainer.style.marginTop = '10px';
-
-    const confirmBtn = buttonContainer.createEl('button', { text: '确认' });
-    confirmBtn.onclick = async () => {
-      const code = inputEl.getValue().trim();
-      if (!code) {
-        new Notice('授权码不能为空');
-        return;
-      }
-      if (!this.plugin.authManager) {
-        new Notice('认证管理器未初始化');
-        modal.close();
-        return;
-      }
-      try {
-        await this.plugin.authManager.exchangeCodeForUserToken(code);
-        // 保存用户令牌
-        await this.plugin.saveUserToken();
-        new Notice('授权成功！');
-        modal.close();
-        this.display();
-      } catch (error) {
-        new Notice('授权失败：' + (error as Error).message);
-      }
-    };
-
-    const cancelBtn = buttonContainer.createEl('button', { text: '取消' });
-    cancelBtn.onclick = () => modal.close();
-
-    modal.open();
-  }
 }
