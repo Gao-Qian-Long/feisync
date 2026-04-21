@@ -1,5 +1,5 @@
 import FlybookPlugin from './main';
-import { App, PluginSettingTab, Setting, Notice, TextComponent, TFolder } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, TextComponent, TFolder, Modal } from 'obsidian';
 
 // 设置接口
 export interface FlybookPluginSettings {
@@ -9,6 +9,7 @@ export interface FlybookPluginSettings {
   feishuRootFolderToken: string;
   autoSyncOnChange: boolean;
   syncInterval: number;
+  proxyUrl: string; // 代理服务器地址，例如 http://your-proxy.com:8080
 }
 
 // 默认设置
@@ -19,6 +20,7 @@ const DEFAULT_SETTINGS: FlybookPluginSettings = {
   feishuRootFolderToken: '',
   autoSyncOnChange: false,
   syncInterval: 5, // 分钟
+  proxyUrl: '', // 代理服务器地址，留空则直连
 };
 
 /**
@@ -68,6 +70,20 @@ export class FlybookSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.appSecret)
           .onChange(async (value: string) => {
             this.plugin.settings.appSecret = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // 代理服务器配置（可选，用于解决 CORS 限制）
+    new Setting(containerEl)
+      .setName('代理服务器地址（可选）')
+      .setDesc('如果直接连接飞书 API 失败，请填写代理服务器地址。例如：http://your-proxy.com:8080')
+      .addText((text: TextComponent) => {
+        text.inputEl.style.width = '100%';
+        text.setPlaceholder('http://your-proxy.com:8080')
+          .setValue(this.plugin.settings.proxyUrl)
+          .onChange(async (value: string) => {
+            this.plugin.settings.proxyUrl = value.trim();
             await this.plugin.saveSettings();
           });
       });
@@ -143,6 +159,63 @@ export class FlybookSettingTab extends PluginSettingTab {
     // 分隔线
     containerEl.createEl('hr');
 
+    // 用户授权区域
+    containerEl.createEl('h3', { text: '飞书用户授权' });
+
+    // 检查用户授权状态
+    const isUserAuthorized = this.plugin.authManager?.isUserAuthorized() ?? false;
+    
+    if (isUserAuthorized) {
+      // 显示已授权状态
+      new Setting(containerEl)
+        .setName('用户已授权')
+        .setDesc('已绑定飞书用户，可以访问个人云空间')
+        .addButton((button) => {
+          button.setButtonText('解除授权')
+            .setWarning()
+            .onClick(async () => {
+              this.plugin.authManager?.clearUserToken();
+              new Notice('已解除用户授权');
+              this.display();
+            });
+        });
+    } else {
+      // 显示授权说明
+      containerEl.createEl('p', {
+        text: '要访问个人云空间，需要进行用户授权。授权后插件将获得访问你个人云空间的权限。',
+        cls: 'flybook-hint'
+      });
+
+      // 授权按钮
+      new Setting(containerEl)
+        .setName('进行用户授权')
+        .setDesc('点击获取授权链接，然后在浏览器中完成授权')
+        .addButton((button) => {
+          button.setButtonText('获取授权链接')
+            .setCta()
+            .onClick(async () => {
+              try {
+                if (!this.plugin.authManager) {
+                  new Notice('认证管理器未初始化');
+                  return;
+                }
+                const oauthUrl = this.plugin.authManager.generateOAuthUrl();
+                // 打开浏览器
+                window.open(oauthUrl);
+                new Notice('已在浏览器中打开授权页面，请完成授权后复制返回的代码');
+                
+                // 弹出输入框让用户粘贴授权码
+                this.showOAuthCodeDialog();
+              } catch (error) {
+                new Notice('获取授权链接失败：' + (error as Error).message);
+              }
+            });
+        });
+    }
+
+    // 分隔线
+    containerEl.createEl('hr');
+
     // 测试连接按钮
     new Setting(containerEl)
       .setName('连接测试')
@@ -191,5 +264,58 @@ export class FlybookSettingTab extends PluginSettingTab {
       text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 相关权限。',
       cls: 'flybook-hint'
     });
+  }
+
+  /**
+   * 显示 OAuth 授权码输入对话框
+   */
+  private showOAuthCodeDialog(): void {
+    const modal = new Modal(this.plugin.app);
+    modal.titleEl.setText('输入授权码');
+    
+    const content = modal.contentEl;
+    content.createDiv({
+      text: '完成授权后，浏览器会跳转并显示授权码。请复制该授权码并粘贴到下方输入框中。',
+      cls: 'flybook-hint'
+    });
+
+    const inputEl = new TextComponent(content);
+    inputEl.inputEl.style.width = '100%';
+    inputEl.inputEl.placeholder = '粘贴授权码...';
+    inputEl.setValue('');
+
+    const buttonContainer = content.createDiv();
+    buttonContainer.style.display = 'flex';
+    buttonContainer.style.gap = '10px';
+    buttonContainer.style.marginTop = '10px';
+
+    const confirmBtn = buttonContainer.createEl('button', { text: '确认' });
+    confirmBtn.onclick = async () => {
+      const code = inputEl.getValue().trim();
+      if (!code) {
+        new Notice('授权码不能为空');
+        return;
+      }
+      if (!this.plugin.authManager) {
+        new Notice('认证管理器未初始化');
+        modal.close();
+        return;
+      }
+      try {
+        await this.plugin.authManager.exchangeCodeForUserToken(code);
+        // 保存用户令牌
+        await this.plugin.saveUserToken();
+        new Notice('授权成功！');
+        modal.close();
+        this.display();
+      } catch (error) {
+        new Notice('授权失败：' + (error as Error).message);
+      }
+    };
+
+    const cancelBtn = buttonContainer.createEl('button', { text: '取消' });
+    cancelBtn.onclick = () => modal.close();
+
+    modal.open();
   }
 }

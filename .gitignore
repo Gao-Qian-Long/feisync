@@ -32,3 +32,4 @@ npm-debug.log*
 
 # 本地配置文件（包含敏感凭证）
 data.json
+error.txt

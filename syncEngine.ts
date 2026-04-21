@@ -145,32 +145,65 @@ export class SyncEngine {
 
   /**
    * 上传单个文件（不处理子文件夹）
+   * 使用飞书文档导入方式同步 Markdown 文件
    */
   private async uploadSingleFile(file: TFile, parentFolderToken: string): Promise<void> {
+    // 判断是否为二进制文件格式
+    const binaryExtensions = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'rar'];
+    const ext = file.extension.toLowerCase();
+    const isBinaryFile = binaryExtensions.indexOf(ext) !== -1;
+
     // 读取文件内容
-    const content = await this.vault.readBinary(file);
+    // 二进制文件使用 readBinary()，文本文件使用 read()
+    let content: string | ArrayBuffer;
+    try {
+      if (isBinaryFile) {
+        content = await this.vault.readBinary(file);
+      } else {
+        content = await this.vault.read(file);
+      }
+    } catch (error) {
+      throw new Error(`读取文件失败: ${(error as Error).message}`);
+    }
 
     // 检查文件大小
-    if (!this.apiClient.checkFileSize(content.byteLength)) {
+    const fileSize = content instanceof ArrayBuffer ? content.byteLength : (content as string).length;
+    if (!this.apiClient.checkFileSize(fileSize)) {
       throw new Error(`文件大小超过20MB限制`);
     }
 
-    // 检查是否已存在同名文件
-    const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
-    if (existingFile) {
-      console.log(`[Flybook] 文件已存在，将执行覆盖: ${file.name}`);
-      await this.apiClient.deleteFile(existingFile.token);
+    // 使用导入方式创建飞书文档
+    // 文件名作为文档标题，保持扩展名便于识别类型
+    const documentTitle = file.name;
+
+    console.log(`[Flybook] 开始导入文件到飞书文档: ${documentTitle}`);
+
+    try {
+      // 使用 importFileAsDocument 方法导入文件
+      const docToken = await this.apiClient.importFileAsDocument(
+        content,
+        file.name,
+        parentFolderToken
+      );
+
+      console.log(`[Flybook] 文档导入成功，token: ${docToken}`);
+
+      // 如果有目标文件夹，将导入的文档移动到目标文件夹
+      if (parentFolderToken) {
+        try {
+          console.log(`[Flybook] 准备移动文档 ${docToken} 到文件夹 ${parentFolderToken}`);
+          await this.apiClient.moveFile(docToken, 'docx', parentFolderToken);
+          console.log(`[Flybook] 文档已移动到目标文件夹: ${parentFolderToken}`);
+        } catch (moveError) {
+          console.warn(`[Flybook] 移动文档到目标文件夹失败:`, moveError);
+          // 不抛出错误，因为导入本身已经成功了
+        }
+      }
+
+    } catch (error) {
+      console.error(`[Flybook] 导入文件 ${file.name} 失败:`, error);
+      throw error;
     }
-
-    // 上传文件
-    await this.apiClient.uploadFile(
-      content,
-      file.name,
-      parentFolderToken,
-      content.byteLength
-    );
-
-    console.log('[Flybook] 上传成功:', file.name);
   }
 
   /**

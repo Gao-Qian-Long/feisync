@@ -98,9 +98,18 @@ export default class FlybookPlugin extends Plugin {
       await this.saveData(this.settings);
       console.log('[Flybook] 设置保存成功');
 
-      // 如果认证信息变更，更新 authManager
-      if (this.authManager) {
-        this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret);
+      // 如果认证信息变更，更新或创建 authManager
+      if (this.settings.appId && this.settings.appSecret) {
+        if (this.authManager) {
+          // 已存在则更新凭证
+          this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
+        } else {
+          // 不存在则创建
+          this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
+          // 同时创建依赖的 API 客户端和同步引擎
+          this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl);
+          this.syncEngine = new SyncEngine(this, this.apiClient);
+        }
       }
 
       // 更新文件监控配置
@@ -119,12 +128,12 @@ export default class FlybookPlugin extends Plugin {
   private initializeModules(): void {
     // 认证管理器
     if (this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret);
+      this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
     }
 
     // API 客户端
     if (this.authManager) {
-      this.apiClient = new FeishuApiClient(this.authManager);
+      this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl);
     }
 
     // 同步引擎
@@ -134,6 +143,43 @@ export default class FlybookPlugin extends Plugin {
 
     // 文件监控器
     this.fileWatcher = new FileWatcher(this);
+    
+    // 尝试从存储中恢复用户授权信息（异步）
+    this.loadUserToken();
+  }
+
+  /**
+   * 从数据文件加载用户令牌
+   */
+  private async loadUserToken(): Promise<void> {
+    try {
+      const data = await this.loadData();
+      if (data && data.feshuUserToken) {
+        const tokenInfo = JSON.parse(data.feshuUserToken);
+        if (tokenInfo && tokenInfo.expiresAt > Date.now()) {
+          this.authManager?.loadUserTokenFromData(tokenInfo);
+          console.log('[Flybook] 用户令牌已从存储恢复');
+        }
+      }
+    } catch (error) {
+      console.error('[Flybook] 加载用户令牌失败:', error);
+    }
+  }
+
+  /**
+   * 保存用户令牌到数据文件
+   */
+  async saveUserToken(): Promise<void> {
+    if (this.authManager?.isUserAuthorized()) {
+      try {
+        const data = await this.loadData();
+        data.feshuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
+        await this.saveData(data);
+        console.log('[Flybook] 用户令牌已保存');
+      } catch (error) {
+        console.error('[Flybook] 保存用户令牌失败:', error);
+      }
+    }
   }
 
   /**
@@ -189,6 +235,11 @@ export default class FlybookPlugin extends Plugin {
    * 测试连接
    */
   async testConnection(): Promise<boolean> {
+    // 如果 authManager 不存在但凭证已配置，则初始化
+    if (!this.authManager && this.settings.appId && this.settings.appSecret) {
+      this.authManager = new FeishuAuthManager(this.settings.appId, this.settings.appSecret);
+    }
+
     if (!this.authManager) {
       new Notice('请先配置飞书凭证');
       return false;
@@ -196,7 +247,7 @@ export default class FlybookPlugin extends Plugin {
 
     try {
       const token = await this.authManager.getAccessToken();
-      const isValid = await validateToken(token);
+      const isValid = await validateToken(token, this.settings.proxyUrl);
 
       if (isValid) {
         console.log('[Flybook] 连接测试成功');
