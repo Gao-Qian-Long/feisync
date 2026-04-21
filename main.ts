@@ -8,7 +8,7 @@ import { FlybookPluginSettings, FlybookSettingTab, getDefaultSettings } from './
 import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
 import { FileWatcher } from './fileWatcher';
-import { SyncEngine } from './syncEngine';
+import { SyncEngine, FileSyncRecord } from './syncEngine';
 
 // 插件主类
 export default class FlybookPlugin extends Plugin {
@@ -184,6 +184,41 @@ export default class FlybookPlugin extends Plugin {
       } catch (error) {
         console.error('[Flybook] 保存用户令牌失败:', error);
       }
+    }
+  }
+
+  /**
+   * 加载同步记录
+   * @returns 文件路径到同步记录的映射
+   */
+  async loadSyncRecords(): Promise<Record<string, FileSyncRecord>> {
+    try {
+      const data = await this.loadData();
+      if (data && data.flybookSyncRecords) {
+        const records = typeof data.flybookSyncRecords === 'string'
+          ? JSON.parse(data.flybookSyncRecords)
+          : data.flybookSyncRecords;
+        console.log(`[Flybook] 已加载 ${Object.keys(records).length} 条同步记录`);
+        return records;
+      }
+    } catch (error) {
+      console.error('[Flybook] 加载同步记录失败:', error);
+    }
+    return {};
+  }
+
+  /**
+   * 保存同步记录
+   * @param records 文件路径到同步记录的映射
+   */
+  async saveSyncRecords(records: Record<string, FileSyncRecord>): Promise<void> {
+    try {
+      const data = await this.loadData();
+      data.flybookSyncRecords = records;
+      await this.saveData(data);
+      console.log(`[Flybook] 已保存 ${Object.keys(records).length} 条同步记录`);
+    } catch (error) {
+      console.error('[Flybook] 保存同步记录失败:', error);
     }
   }
 

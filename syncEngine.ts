@@ -1,6 +1,7 @@
 /**
  * 同步引擎
  * 负责协调文件扫描、上传和飞书Drive操作
+ * 支持增量同步：基于文件内容哈希跳过未修改文件
  */
 
 import { Vault, TFile, TFolder } from 'obsidian';
@@ -11,8 +12,40 @@ import { Notice } from 'obsidian';
 export interface SyncResult {
   success: boolean;
   uploadedCount: number;
+  skippedCount: number;
   failedCount: number;
   errors: string[];
+}
+
+/** 单个文件的同步记录 */
+export interface FileSyncRecord {
+  /** 文件内容哈希（SHA-256 hex） */
+  hash: string;
+  /** 上次同步成功的时间戳（毫秒） */
+  lastSyncTime: number;
+  /** 云端文件的 token（用于删除旧文件） */
+  cloudToken: string;
+  /** 云端文件类型（如 'file', 'docx' 等） */
+  cloudType: string;
+  /** 云端父文件夹 token */
+  parentFolderToken: string;
+}
+
+/**
+ * 计算文件内容的 SHA-256 哈希
+ * @param content 文件内容（字符串或 ArrayBuffer）
+ * @returns SHA-256 哈希的十六进制字符串
+ */
+async function computeHash(content: string | ArrayBuffer): Promise<string> {
+  let buffer: ArrayBuffer;
+  if (typeof content === 'string') {
+    buffer = new TextEncoder().encode(content).buffer;
+  } else {
+    buffer = content;
+  }
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
@@ -30,12 +63,13 @@ export class SyncEngine {
   }
 
   /**
-   * 执行一次完整同步
+   * 执行一次完整同步（增量）
    */
   async sync(): Promise<SyncResult> {
     const result: SyncResult = {
       success: true,
       uploadedCount: 0,
+      skippedCount: 0,
       failedCount: 0,
       errors: [],
     };
@@ -53,7 +87,6 @@ export class SyncEngine {
     // 2. 获取飞书目标文件夹
     let targetFolderToken = feishuRootFolderToken;
     if (!targetFolderToken) {
-      // 尝试查找或创建默认的 ObsidianSync 文件夹
       targetFolderToken = await this.ensureDefaultFolder();
     }
 
@@ -64,31 +97,185 @@ export class SyncEngine {
       return result;
     }
 
-    // 4. 逐个上传文件
+    // 4. 加载同步记录
+    const syncRecords = await this.plugin.loadSyncRecords();
+
+    // 5. 逐个处理文件
     new Notice(`开始同步 ${localFiles.length} 个文件...`);
 
     for (const localFile of localFiles) {
       try {
-        await this.uploadFile(localFile, localFolderPath, targetFolderToken);
-        result.uploadedCount++;
+        const uploaded = await this.syncFile(localFile, localFolderPath, targetFolderToken, syncRecords);
+        if (uploaded) {
+          result.uploadedCount++;
+        } else {
+          result.skippedCount++;
+        }
       } catch (error) {
         result.failedCount++;
-        const errorMsg = `上传文件 ${localFile.path} 失败: ${(error as Error).message}`;
+        const errorMsg = `同步文件 ${localFile.path} 失败: ${(error as Error).message}`;
         result.errors.push(errorMsg);
         console.error('[Flybook]', errorMsg);
       }
     }
 
-    // 5. 汇总结果
+    // 6. 保存同步记录
+    await this.plugin.saveSyncRecords(syncRecords);
+
+    // 7. 汇总结果
     if (result.failedCount === 0) {
       result.success = true;
-      new Notice(`同步完成！成功上传 ${result.uploadedCount} 个文件`);
+      const parts: string[] = [];
+      if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
+      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
+      if (parts.length === 0) parts.push('无变化');
+      new Notice(`同步完成！${parts.join('，')}`);
     } else {
       result.success = false;
-      new Notice(`同步完成：成功 ${result.uploadedCount} 个，失败 ${result.failedCount} 个`);
+      new Notice(`同步完成：成功 ${result.uploadedCount} 个，跳过 ${result.skippedCount} 个，失败 ${result.failedCount} 个`);
     }
 
     return result;
+  }
+
+  /**
+   * 同步单个文件（增量判断）
+   * @returns true 表示文件已上传，false 表示文件被跳过（未变化）
+   */
+  private async syncFile(
+    file: TFile,
+    localFolderPath: string,
+    targetFolderToken: string,
+    syncRecords: Record<string, FileSyncRecord>
+  ): Promise<boolean> {
+    // 判断是否为二进制文件格式
+    const binaryExtensions = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'rar'];
+    const ext = file.extension.toLowerCase();
+    const isBinaryFile = binaryExtensions.indexOf(ext) !== -1;
+
+    // 读取文件内容
+    let content: string | ArrayBuffer;
+    try {
+      if (isBinaryFile) {
+        content = await this.vault.readBinary(file);
+      } else {
+        content = await this.vault.read(file);
+      }
+    } catch (error) {
+      throw new Error(`读取文件失败: ${(error as Error).message}`);
+    }
+
+    // 计算文件内容哈希
+    const currentHash = await computeHash(content);
+
+    // 计算相对于监控文件夹的路径，确定目标文件夹
+    const relativePath = file.path;
+    const pathParts = relativePath.split('/');
+    let parentFolderToken: string;
+
+    if (pathParts.length === 1) {
+      parentFolderToken = targetFolderToken;
+    } else {
+      const subPath = pathParts.slice(1, -1).join('/');
+      parentFolderToken = await this.apiClient.ensureFolderPath(subPath, targetFolderToken);
+    }
+
+    // 查找已有的同步记录
+    const recordKey = file.path;
+    const existingRecord = syncRecords[recordKey];
+
+    // 增量判断：哈希相同且云端文件夹未变 → 跳过
+    if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
+      console.log(`[Flybook] 文件未变化，跳过: ${file.path}`);
+      return false;
+    }
+
+    // 文件有变化或为新文件，需要上传
+    if (existingRecord) {
+      console.log(`[Flybook] 文件已变化，重新上传: ${file.path} (旧哈希: ${existingRecord.hash.substring(0, 8)}..., 新哈希: ${currentHash.substring(0, 8)}...)`);
+    } else {
+      console.log(`[Flybook] 新文件，上传: ${file.path}`);
+    }
+
+    // 执行上传（含删除旧文件逻辑）
+    const { fileToken, fileType } = await this.uploadFileContent(
+      file,
+      content,
+      parentFolderToken,
+      existingRecord
+    );
+
+    // 更新同步记录
+    syncRecords[recordKey] = {
+      hash: currentHash,
+      lastSyncTime: Date.now(),
+      cloudToken: fileToken,
+      cloudType: fileType,
+      parentFolderToken: parentFolderToken,
+    };
+
+    return true;
+  }
+
+  /**
+   * 上传文件内容到飞书
+   * 如果存在旧记录，先删除旧文件再上传
+   */
+  private async uploadFileContent(
+    file: TFile,
+    content: string | ArrayBuffer,
+    parentFolderToken: string,
+    existingRecord: FileSyncRecord | undefined
+  ): Promise<{ fileToken: string; fileType: string }> {
+    const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
+
+    // 检查文件大小
+    if (!this.apiClient.checkFileSize(fileSize)) {
+      throw new Error('文件大小超过20MB限制');
+    }
+
+    // 如果有同步记录，先删除云端旧文件
+    if (existingRecord) {
+      try {
+        console.log(`[Flybook] 删除云端旧文件: ${existingRecord.cloudToken} (类型: ${existingRecord.cloudType})`);
+        await this.apiClient.deleteFile(existingRecord.cloudToken, existingRecord.cloudType);
+        console.log(`[Flybook] 旧文件已删除`);
+      } catch (deleteError) {
+        console.warn(`[Flybook] 删除旧文件失败，继续上传新版本:`, deleteError);
+      }
+    } else {
+      // 没有同步记录（新文件），但云端可能存在同名文件（手动上传或记录丢失）
+      // 尝试查找并删除
+      try {
+        const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
+        if (existingFile) {
+          console.log(`[Flybook] 云端存在同名文件但无同步记录，删除: ${existingFile.token}`);
+          try {
+            await this.apiClient.deleteFile(existingFile.token, existingFile.type);
+          } catch (deleteError) {
+            console.warn(`[Flybook] 删除同名文件失败，继续上传:`, deleteError);
+          }
+        }
+      } catch (error) {
+        console.warn(`[Flybook] 检查云端文件存在性失败，继续上传:`, error);
+      }
+    }
+
+    // 上传文件
+    const fileBuffer = content instanceof ArrayBuffer
+      ? content
+      : new TextEncoder().encode(content as string).buffer;
+
+    const fileToken = await this.apiClient.uploadFile(
+      new Uint8Array(fileBuffer),
+      file.name,
+      parentFolderToken,
+      fileSize
+    );
+
+    console.log(`[Flybook] 文件上传成功，token: ${fileToken}`);
+
+    return { fileToken, fileType: 'file' };
   }
 
   /**
@@ -97,16 +284,13 @@ export class SyncEngine {
   private scanLocalFolder(folderPath: string): TFile[] {
     const files: TFile[] = [];
 
-    // 获取文件夹对象
     const folder = this.vault.getFolderByPath(folderPath);
     if (!folder) {
       console.warn('[Flybook] 本地文件夹不存在:', folderPath);
       return files;
     }
 
-    // 递归收集所有文件
     this.collectFiles(folder, files);
-
     return files;
   }
 
@@ -124,120 +308,18 @@ export class SyncEngine {
   }
 
   /**
-   * 上传单个文件到飞书
-   */
-  private async uploadFile(file: TFile, _localFolderPath: string, targetFolderToken: string): Promise<void> {
-    // 计算相对于监控文件夹的路径
-    const relativePath = file.path;
-    const pathParts = relativePath.split('/');
-
-    // 如果文件直接在监控文件夹根目录，则没有子路径
-    if (pathParts.length === 1) {
-      // 文件在根目录，直接上传到目标文件夹
-      await this.uploadSingleFile(file, targetFolderToken);
-    } else {
-      // 文件在子文件夹中，需要创建对应的子文件夹结构
-      const subPath = pathParts.slice(1, -1).join('/'); // 去掉文件名和第一个路径（监控文件夹名）
-      const folderToken = await this.apiClient.ensureFolderPath(subPath, targetFolderToken);
-      await this.uploadSingleFile(file, folderToken);
-    }
-  }
-
-  /**
-   * 上传单个文件（不处理子文件夹）
-   * 使用飞书普通文件上传方式同步文件
-   */
-  private async uploadSingleFile(file: TFile, parentFolderToken: string): Promise<void> {
-    // 判断是否为二进制文件格式
-    const binaryExtensions = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'rar'];
-    const ext = file.extension.toLowerCase();
-    const isBinaryFile = binaryExtensions.indexOf(ext) !== -1;
-
-    // 读取文件内容
-    // 二进制文件使用 readBinary()，文本文件使用 read()
-    let content: string | ArrayBuffer;
-    try {
-      if (isBinaryFile) {
-        content = await this.vault.readBinary(file);
-      } else {
-        content = await this.vault.read(file);
-      }
-    } catch (error) {
-      throw new Error(`读取文件失败: ${(error as Error).message}`);
-    }
-
-    // 计算文件大小
-    const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
-    
-    // 检查文件大小
-    if (!this.apiClient.checkFileSize(fileSize)) {
-      throw new Error(`文件大小超过20MB限制`);
-    }
-
-    // 文件名作为文档标题
-    const documentTitle = file.name;
-
-    console.log(`[Flybook] 开始同步文件到飞书: ${documentTitle}`);
-
-    // 检查云端是否已存在同名文件
-    let existingFile = null;
-    try {
-      existingFile = await this.apiClient.findFileByName(documentTitle, parentFolderToken);
-    } catch (error) {
-      console.warn(`[Flybook] 检查云端文件存在性失败，继续上传新文件:`, error);
-    }
-
-    try {
-      if (existingFile) {
-        // 文件已存在，删除旧文件后重新上传
-        console.log(`[Flybook] 云端已存在同名文件 ${documentTitle}，token: ${existingFile.token}，类型: ${existingFile.type}，删除旧文件后重新上传...`);
-        
-        try {
-          // 传递文件的实际类型（如 'file', 'docx', 'sheet' 等）
-          await this.apiClient.deleteFile(existingFile.token, existingFile.type);
-          console.log(`[Flybook] 旧文件已删除`);
-        } catch (deleteError) {
-          console.warn(`[Flybook] 删除旧文件失败，继续上传新版本:`, deleteError);
-        }
-      }
-      
-      // 上传文件（使用普通文件上传方式，parent_type 为 'explorer'）
-      console.log(`[Flybook] 开始上传文件到文件夹 ${parentFolderToken}...`);
-      
-      // 将字符串内容转换为 ArrayBuffer
-      const fileBuffer = content instanceof ArrayBuffer 
-        ? content 
-        : new TextEncoder().encode(content as string).buffer;
-      
-      const fileToken = await this.apiClient.uploadFile(
-        new Uint8Array(fileBuffer),
-        file.name,
-        parentFolderToken,
-        fileSize
-      );
-      
-      console.log(`[Flybook] 文件上传成功，token: ${fileToken}`);
-    } catch (error) {
-      console.error(`[Flybook] 同步文件 ${file.name} 失败:`, error);
-      throw error;
-    }
-  }
-
-  /**
    * 确保存在默认的 ObsidianSync 文件夹
    */
   private async ensureDefaultFolder(): Promise<string> {
     const defaultFolderName = 'ObsidianSync';
-    const rootFolderToken = ''; // 空表示根目录
+    const rootFolderToken = '';
 
-    // 尝试查找是否已存在
     const existing = await this.apiClient.findFolderByName(defaultFolderName, rootFolderToken);
     if (existing) {
       console.log('[Flybook] 找到已存在的文件夹:', defaultFolderName, existing.token);
       return existing.token;
     }
 
-    // 不存在则创建
     console.log('[Flybook] 创建默认文件夹:', defaultFolderName);
     const newToken = await this.apiClient.createFolder(defaultFolderName, rootFolderToken);
     return newToken;
