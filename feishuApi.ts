@@ -203,9 +203,9 @@ export class FeishuApiClient {
    */
   async listFolderContents(folderToken: string): Promise<FeishuFileMeta[]> {
     try {
-      // 如果 folderToken 为空，则获取根目录列表
+      // 使用 folder_token 查询参数，根据飞书官方文档
       const path = folderToken
-        ? `/open-apis/drive/v1/files/${folderToken}/children`
+        ? `/open-apis/drive/v1/files?folder_token=${folderToken}`
         : '/open-apis/drive/v1/files';
       const endpoint = this.getApiUrl(path);
 
