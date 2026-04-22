@@ -6,6 +6,5 @@
 	"description": "Sync your notes to Feishu (Lark) Drive.",
 	"author": "Gao-Qian-Long",
 	"authorUrl": "https://github.com/Gao-Qian-Long",
-	"isDesktopOnly": true,
-	"repository": "Gao-Qian-Long/feisync"
+	"isDesktopOnly": true
 }
