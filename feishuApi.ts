@@ -3,6 +3,7 @@
  * 负责文件夹管理、文件上传（含分片）、下载、速率限制与重试
  */
 
+import { requestUrl, RequestUrlParam } from 'obsidian';
 import { FeishuAuthManager } from './feishuAuth';
 
 // 请求超时时间（毫秒）
@@ -78,8 +79,8 @@ async function withRetry<T>(
       lastError = error as Error;
       const msg = lastError.message || '';
 
-      // 不重试的错误：认证错误、权限错误、参数错误、文件已删除
-      const noRetryPatterns = ['1061007', 'file has been delete', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
+      // 不重试的错误：认证错误、权限错误、参数错误、文件已删除、IP 限制
+      const noRetryPatterns = ['1061007', 'file has been delete', '99991401', 'is denied by app setting', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
       const shouldNotRetry = noRetryPatterns.some(p => msg.toLowerCase().includes(p.toLowerCase()));
       if (shouldNotRetry) {
         break;
@@ -140,7 +141,9 @@ export class FeishuApiClient {
 
   /**
    * 获取认证头
-   * 优先使用 user_access_token（如果已授权），否则使用 tenant_access_token
+   * - 如果用户已授权，始终使用 user_access_token（不受 IP 白名单限制，文件所有者为用户本人）
+   * - 如果用户未授权，使用 tenant_access_token（受 IP 白名单限制，文件所有者为应用）
+   * - 一旦用户授权过，不再回退到 tenant_access_token，避免文件所有者不一致和 IP 白名单问题
    * @param requireUserToken 是否强制要求 user_access_token（下载等操作需要）
    */
   private async getHeaders(requireUserToken: boolean = false): Promise<Record<string, string>> {
@@ -150,13 +153,14 @@ export class FeishuApiClient {
       try {
         token = await this.authManager.getUserAccessToken();
       } catch (error) {
-        if (requireUserToken) {
-          // 下载等操作必须使用 user_access_token，不能回退
-          throw new Error('此操作需要用户授权，请在设置中重新进行飞书 OAuth 授权');
-        }
-        console.warn('[FeiSync] 获取 user_access_token 失败，回退到 tenant_access_token:', error);
-        token = await this.authManager.getAccessToken();
+        // 用户已授权但 token 获取/刷新失败，不再回退到 tenant_access_token
+        // 因为回退会导致：1) IP 白名单限制 (99991401) 2) 文件所有者变为应用而非用户
+        console.error('[FeiSync] 获取 user_access_token 失败，需要重新授权:', error);
+        throw new Error('用户授权已失效，请在设置中重新进行飞书 OAuth 授权');
       }
+    } else if (this.authManager.wasUserAuthorized()) {
+      // 用户曾经授权过但 token 已失效（被清除），不应回退到 tenant_access_token
+      throw new Error('用户授权已失效，请在设置中重新进行飞书 OAuth 授权');
     } else {
       if (requireUserToken) {
         throw new Error('此操作需要用户授权，请在设置中完成飞书 OAuth 授权');
@@ -171,31 +175,95 @@ export class FeishuApiClient {
   }
 
   /**
-   * 带超时和速率限制的 fetch 请求
+   * 带超时和速率限制的 requestUrl 请求
    */
   private async fetchWithTimeout(
     url: string,
-    options: RequestInit,
+    options: RequestInit & { body?: any },
     timeout: number = REQUEST_TIMEOUT
   ): Promise<any> {
     // 速率限制
     await this.rateLimiter.acquire();
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const method = (options.method || 'GET') as string;
+    const headers: Record<string, string> = {};
+    if (options.headers) {
+      if (options.headers instanceof Headers) {
+        options.headers.forEach((v, k) => { headers[k] = v; });
+      } else if (Array.isArray(options.headers)) {
+        for (const [k, v] of options.headers) { headers[k] = v; }
+      } else {
+        Object.assign(headers, options.headers);
+      }
+    }
+
+    // 判断是否为 FormData 上传
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+
+    let body: any = undefined;
+    if (isFormData) {
+      // requestUrl 不支持 FormData，需要手动构建 multipart
+      const formData = options.body as FormData;
+      const boundary = '----FeiSyncBoundary' + Date.now().toString(16);
+      const parts: ArrayBuffer[] = [];
+      const encoder = new TextEncoder();
+
+      const entries: [string, any][] = [];
+      formData.forEach((value, key) => { entries.push([key, value]); });
+
+      for (const [key, value] of entries) {
+        parts.push(encoder.encode(`--${boundary}\r\n`));
+        if (value instanceof Blob || (typeof File !== 'undefined' && value instanceof File)) {
+          const file = value as File;
+          const fileName = file.name || 'file';
+          const mimeType = file.type || 'application/octet-stream';
+          parts.push(encoder.encode(
+            `Content-Disposition: form-data; name="${key}"; filename="${fileName}"\r\n` +
+            `Content-Type: ${mimeType}\r\n\r\n`
+          ));
+          parts.push(await file.arrayBuffer());
+          parts.push(encoder.encode('\r\n'));
+        } else {
+          parts.push(encoder.encode(
+            `Content-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`
+          ));
+        }
+      }
+      parts.push(encoder.encode(`--${boundary}--\r\n`));
+
+      // 合并所有 parts
+      const totalLen = parts.reduce((acc, p) => acc + p.byteLength, 0);
+      const combined = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const p of parts) {
+        combined.set(new Uint8Array(p), offset);
+        offset += p.byteLength;
+      }
+
+      body = combined.buffer;
+      headers['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
+    } else if (options.body) {
+      body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    }
+
+    const requestParams: RequestUrlParam = {
+      url,
+      method,
+      headers,
+      body,
+      throw: false,
+    };
 
     try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
+      const response = await requestUrl(requestParams);
 
-      const responseText = await response.text();
+      const responseText = typeof response.text === 'string' ? response.text : JSON.stringify(response.json);
 
-      if (!response.ok) {
+      // requestUrl 对 4xx/5xx 不会自动抛出，但保险起见检查 status
+      if (response.status >= 400) {
         let errorMsg = `HTTP ${response.status}`;
         try {
-          const errorData = JSON.parse(responseText);
+          const errorData = response.json;
           errorMsg = `HTTP ${response.status}: ${JSON.stringify(errorData)}`;
           console.error('[FeiSync] API 错误详情:', errorData);
         } catch {
@@ -206,12 +274,16 @@ export class FeishuApiClient {
       }
 
       try {
-        return JSON.parse(responseText);
+        return response.json;
       } catch (parseError) {
         throw new Error(`JSON 解析失败: ${responseText.substring(0, 200)}`);
       }
-    } finally {
-      clearTimeout(timeoutId);
+    } catch (error) {
+      if ((error as Error).message?.startsWith('HTTP ')) {
+        throw error;
+      }
+      // requestUrl 网络错误等
+      throw new Error(`请求失败: ${(error as Error).message}`);
     }
   }
 
@@ -643,29 +715,24 @@ export class FeishuApiClient {
         const headers = await this.getHeaders();
 
         await this.rateLimiter.acquire();
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 120000);
 
         const endpoint = this.getApiUrl(apiPath);
         console.log(`[FeiSync][DEBUG] 下载请求: ${endpoint} (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})`);
 
-        const response = await fetch(endpoint, {
+        const response = await requestUrl({
+          url: endpoint,
           method: 'GET',
           headers,
-          signal: controller.signal,
+          throw: false,
         });
 
-        clearTimeout(timeoutId);
+        console.log(`[FeiSync][DEBUG] 响应状态: ${response.status}`);
 
-        console.log(`[FeiSync][DEBUG] 响应状态: ${response.status} ${response.statusText}`);
-        console.log(`[FeiSync][DEBUG] 响应 Content-Type: ${response.headers.get('content-type')}`);
-
-        if (!response.ok) {
+        if (response.status >= 400) {
           let errorMsg = `HTTP ${response.status}`;
           try {
-            const errorText = await response.text();
-            console.log(`[FeiSync][DEBUG] 错误响应内容: ${errorText.substring(0, 500)}`);
-            const errorData = JSON.parse(errorText);
+            const errorData = response.json;
+            console.log(`[FeiSync][DEBUG] 错误响应内容: ${JSON.stringify(errorData).substring(0, 500)}`);
             errorMsg = `HTTP ${response.status}: ${errorData.msg || JSON.stringify(errorData)}`;
           } catch {
             // 不是 JSON 错误响应
@@ -673,10 +740,10 @@ export class FeishuApiClient {
           throw new Error(errorMsg);
         }
 
-        const contentLength = response.headers.get('content-length');
-        console.log(`[FeiSync][DEBUG] Content-Length: ${contentLength || 'unknown'}`);
-
-        return await response.arrayBuffer();
+        // requestUrl 的 arrayBuffer 属性直接获取二进制数据
+        const result = response.arrayBuffer;
+        console.log(`[FeiSync][DEBUG] 下载成功，大小: ${result.byteLength} bytes`);
+        return result;
       } catch (error) {
         lastError = error as Error;
         const msg = lastError.message || '';
@@ -866,14 +933,22 @@ export class FeishuApiClient {
 
   /**
    * 检查云端文件是否仍然存在
-   * 通过在父文件夹中查找同名文件来验证
+   * 通过在父文件夹中查找同名文件来验证（飞书没有通过 file_token 直接查文件元数据的 API）
+   * 同时匹配文件名和 token，两者任一匹配即视为存在
+   * 注意：授权错误会向上抛出，调用方应区分"文件不存在"和"检查出错"
    */
-  async checkFileExists(fileToken: string, parentFolderToken: string): Promise<boolean> {
+  async checkFileExists(fileToken: string, parentFolderToken: string, fileName: string): Promise<boolean> {
     try {
       const files = await this.listFolderContents(parentFolderToken);
-      return files.some(f => f.token === fileToken);
+      // 匹配条件：token 相同 或 同名同类型（file/docx/sheet）
+      return files.some(f => f.token === fileToken || (f.name === fileName && (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')));
     } catch (error) {
-      // 如果连父文件夹都访问失败，保守地认为文件可能已不存在
+      const errMsg = (error as Error).message || '';
+      // 授权错误：向上抛出，让调用方中止操作
+      if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
+        throw error;
+      }
+      // 其他错误（如网络问题），保守地认为文件可能已不存在
       console.warn('[FeiSync] 检查文件存在性失败:', error);
       return false;
     }

@@ -4,6 +4,7 @@
  * 以及实现 user_access_token 的 OAuth 授权流程
  */
 
+import { requestUrl, RequestUrlParam } from 'obsidian';
 import * as http from 'http';
 
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300; // 提前5分钟过期
@@ -29,9 +30,11 @@ export class FeishuAuthManager {
   private userTokenInfo: UserTokenInfo | null = null;
   private oauthState: string = '';  // OAuth 状态码，用于防止 CSRF 攻击
   private callbackCancelFn: (() => void) | null = null; // 用于取消本地回调等待
-  private onTokenChange: (() => void) | null = null; // token 变化时的回调（用于持久化）
+  private onTokenChange: (() => Promise<void>) | null = null; // token 变化时的回调（用于持久化）
+  private refreshPromise: Promise<UserTokenInfo> | null = null; // 刷新锁，防止并发刷新
+  private _wasUserAuthorized: boolean = false; // 标记用户是否曾经授权过（即使 token 失效也为 true）
 
-  constructor(appId: string, appSecret: string, proxyUrl: string = '', onTokenChange?: () => void) {
+  constructor(appId: string, appSecret: string, proxyUrl: string = '', onTokenChange?: () => Promise<void>) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.proxyUrl = proxyUrl;
@@ -86,20 +89,17 @@ export class FeishuAuthManager {
       app_secret: this.appSecret,
     };
 
-    const response = await fetch(url, {
+    const response = await requestUrl({
+      url,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      throw: false,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`获取 app_access_token 失败: HTTP ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json();
+    const data = response.json;
     if (data.code !== 0) {
       throw new Error(`获取 app_access_token 失败: ${data.msg} (code: ${data.code})`);
     }
@@ -134,27 +134,18 @@ export class FeishuAuthManager {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
       try {
-        const response = await fetch(url, {
+        const response = await requestUrl({
+          url,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(payload),
-          signal: controller.signal,
+          throw: false,
         });
 
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errorText}`);
-        }
-
-        const data = await response.json();
+        const data = response.json;
         if (data.code !== 0) {
           throw new Error(`飞书 API 错误: ${data.msg} (code: ${data.code})`);
         }
@@ -169,7 +160,6 @@ export class FeishuAuthManager {
 
         return token;
       } catch (error) {
-        clearTimeout(timeoutId);
         lastError = error as Error;
         console.warn(`[FeiSync] 获取 tenant_access_token 失败 (尝试 ${attempt + 1}/${MAX_RETRIES + 1}):`, error);
         // 如果不是最后一次尝试，等待片刻后重试
@@ -392,20 +382,17 @@ export class FeishuAuthManager {
 
     console.log('[FeiSync] 正在交换授权码获取用户令牌...');
 
-    const response = await fetch(url, {
+    const response = await requestUrl({
+      url,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: JSON.stringify(payload),
+      throw: false,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`获取用户令牌失败: HTTP ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json();
+    const data = response.json;
     console.log('[FeiSync] OAuth 响应:', JSON.stringify(data, null, 2));
 
     if (data.code !== 0) {
@@ -423,8 +410,9 @@ export class FeishuAuthManager {
     };
 
     this.userTokenInfo = tokenInfo;
+    this._wasUserAuthorized = true;
     console.log('[FeiSync] 用户令牌获取成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    this.onTokenChange?.();
+    await this.onTokenChange?.();
 
     return tokenInfo;
   }
@@ -449,20 +437,17 @@ export class FeishuAuthManager {
 
     console.log('[FeiSync] 正在刷新用户令牌...');
 
-    const response = await fetch(url, {
+    const response = await requestUrl({
+      url,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      throw: false,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`刷新用户令牌失败: HTTP ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json();
+    const data = response.json;
     if (data.code !== 0) {
       throw new Error(`刷新用户令牌失败: ${data.msg} (code: ${data.code})`);
     }
@@ -479,7 +464,7 @@ export class FeishuAuthManager {
 
     this.userTokenInfo = tokenInfo;
     console.log('[FeiSync] 用户令牌刷新成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    this.onTokenChange?.();
+    await this.onTokenChange?.();
 
     return tokenInfo;
   }
@@ -488,6 +473,7 @@ export class FeishuAuthManager {
    * 获取有效的用户访问令牌
    * 如果用户令牌不存在或已过期，自动刷新
    * 注意：飞书 refresh_token 是一次性的，刷新成功后旧 token 立即失效
+   * 使用刷新锁防止并发请求导致 refresh_token 被重复使用（20064 错误）
    */
   async getUserAccessToken(): Promise<string> {
     // 如果没有用户令牌，抛出错误
@@ -497,28 +483,53 @@ export class FeishuAuthManager {
 
     // 检查是否即将过期（5分钟内），如果快过期了先刷新
     if (Date.now() > this.userTokenInfo.expiresAt - 5 * 60 * 1000) {
-      console.log('[FeiSync] 用户令牌即将过期，尝试刷新...');
+      // 刷新锁：如果已有刷新操作在进行中，等待它完成而不是再次刷新
+      if (!this.refreshPromise) {
+        console.log('[FeiSync] 用户令牌即将过期，尝试刷新...');
+        this.refreshPromise = this.doRefreshUserToken().finally(() => {
+          this.refreshPromise = null; // 刷新完成后释放锁
+        });
+      } else {
+        console.log('[FeiSync] 已有刷新操作进行中，等待完成...');
+      }
+
       try {
-        await this.refreshUserToken();
+        await this.refreshPromise;
       } catch (error) {
-        // refresh_token 是一次性的，刷新失败后旧 token 已被撤销
-        // 必须清除用户令牌信息，防止后续请求继续使用失效的 refresh_token
-        const errMsg = (error as Error).message || '';
-        console.error('[FeiSync] 刷新用户令牌失败:', error);
-        
-        if (errMsg.includes('invalid_grant') || errMsg.includes('revoked') || errMsg.includes('20064')) {
-          // refresh_token 已被撤销，需要重新授权
-          console.warn('[FeiSync] refresh_token 已失效，需要重新授权');
-          this.clearUserToken();
-          this.onTokenChange?.();
-          throw new Error('用户令牌已过期且刷新失败，请重新授权');
-        }
-        
-        throw new Error('用户令牌已过期，请重新授权');
+        // 刷新失败，错误已在 doRefreshUserToken 中处理
+        throw error;
+      }
+
+      // 刷新后检查 token 是否仍可用（可能已被清除需要重新授权）
+      if (!this.userTokenInfo) {
+        throw new Error('用户令牌已过期且刷新失败，请重新授权');
       }
     }
 
     return this.userTokenInfo.accessToken;
+  }
+
+  /**
+   * 执行用户令牌刷新（内部方法，含错误处理）
+   * 刷新失败时清除用户令牌，防止后续请求继续使用失效的 refresh_token
+   */
+  private async doRefreshUserToken(): Promise<void> {
+    try {
+      await this.refreshUserToken();
+    } catch (error) {
+      const errMsg = (error as Error).message || '';
+      console.error('[FeiSync] 刷新用户令牌失败:', error);
+
+      if (errMsg.includes('invalid_grant') || errMsg.includes('revoked') || errMsg.includes('20064')) {
+        // refresh_token 已被撤销，需要重新授权
+        console.warn('[FeiSync] refresh_token 已失效，需要重新授权');
+        this.clearUserToken();
+        await this.onTokenChange?.();
+        throw new Error('用户令牌已过期且刷新失败，请重新授权');
+      }
+
+      throw new Error('用户令牌已过期，请重新授权');
+    }
   }
 
   /**
@@ -528,6 +539,15 @@ export class FeishuAuthManager {
    */
   isUserAuthorized(): boolean {
     return this.userTokenInfo !== null && !!this.userTokenInfo.refreshToken;
+  }
+
+  /**
+   * 检查用户是否曾经授权过（即使 token 已失效）
+   * 用于区分"从未授权"和"授权过但失效"两种状态
+   * 一旦用户授权过，不应回退到 tenant_access_token
+   */
+  wasUserAuthorized(): boolean {
+    return this._wasUserAuthorized;
   }
 
   /**
@@ -573,6 +593,7 @@ export class FeishuAuthManager {
         const tokenInfo = JSON.parse(saved) as UserTokenInfo;
         if (tokenInfo.refreshToken) {
           this.userTokenInfo = tokenInfo;
+          this._wasUserAuthorized = true;
           const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
           console.log(`[FeiSync] 用户令牌已从存储恢复（${status}）`);
         } else {
@@ -591,6 +612,7 @@ export class FeishuAuthManager {
   loadUserTokenFromData(tokenInfo: UserTokenInfo): void {
     if (tokenInfo.refreshToken) {
       this.userTokenInfo = tokenInfo;
+      this._wasUserAuthorized = true;
       const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
       console.log(`[FeiSync] 用户令牌已恢复（${status}）`);
     } else {
@@ -620,19 +642,17 @@ export async function validateToken(token: string, proxyUrl: string = ''): Promi
   }
 
   try {
-    const response = await fetch(url, {
+    const response = await requestUrl({
+      url,
       method: 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
+      throw: false,
     });
 
-    if (!response.ok) {
-      return false;
-    }
-
-    const data = await response.json();
+    const data = response.json;
     return data.code === 0;
   } catch (error) {
     console.error('[FeiSync] 验证令牌失败:', error);

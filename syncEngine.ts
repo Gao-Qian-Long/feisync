@@ -176,10 +176,22 @@ export class SyncEngine {
             result.deletedCount++;
             this.addLog('delete', filePath, `云端文件已删除 (token: ${record.cloudToken})`);
           } catch (error) {
-            const msg = `删除云端文件 ${filePath} 失败: ${(error as Error).message}`;
-            result.errors.push(msg);
-            this.addLog('error', filePath, msg);
-            console.warn('[FeiSync]', msg);
+            const errMsg = (error as Error).message || '';
+            if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+              // IP 白名单限制，给出明确提示
+              const ipMsg = `删除云端文件 ${filePath} 失败：飞书应用 IP 白名单限制，请在开放平台关闭 IP 限制或添加当前 IP`;
+              result.errors.push(ipMsg);
+              this.addLog('error', filePath, ipMsg);
+              console.warn('[FeiSync]', ipMsg);
+              new Notice('飞书应用 IP 白名单限制，无法删除云端文件。请在飞书开放平台关闭 IP 限制', 8000);
+              // 仍然从记录中移除，避免反复尝试
+              recordsToDelete.push(filePath);
+            } else {
+              const msg = `删除云端文件 ${filePath} 失败: ${errMsg}`;
+              result.errors.push(msg);
+              this.addLog('error', filePath, msg);
+              console.warn('[FeiSync]', msg);
+            }
           }
         }
       }
@@ -201,8 +213,12 @@ export class SyncEngine {
     this.addLog('info', '', `开始同步 ${localFiles.length} 个文件`);
 
     const pool = new ConcurrencyPool(this.plugin.settings.maxConcurrentUploads);
+    let authError: Error | null = null; // 授权错误标记，遇到后立即中止
+
     const uploadPromises = localFiles.map(file =>
       pool.run(async () => {
+        // 如果已经遇到授权错误，不再处理后续文件
+        if (authError) return;
         try {
           const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, syncRecords);
           if (uploaded) {
@@ -211,16 +227,34 @@ export class SyncEngine {
             result.skippedCount++;
           }
         } catch (error) {
+          const errMsg = (error as Error).message || '';
+          // 授权错误：记录后立即中止，不再处理其他文件
+          if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
+            authError = error as Error;
+            result.failedCount++;
+            result.errors.push(`授权已失效，同步中止: ${errMsg}`);
+            this.addLog('error', file.path, errMsg);
+            return;
+          }
           result.failedCount++;
-          const errorMsg = `同步文件 ${file.path} 失败: ${(error as Error).message}`;
+          const errorMsg = `同步文件 ${file.path} 失败: ${errMsg}`;
           result.errors.push(errorMsg);
-          this.addLog('error', file.path, (error as Error).message);
+          this.addLog('error', file.path, errMsg);
           console.error('[FeiSync]', errorMsg);
         }
       })
     );
 
     await Promise.all(uploadPromises);
+
+    // 如果是授权错误，提前中止并给出明确提示
+    if (authError) {
+      result.success = false;
+      new Notice('同步失败：用户授权已失效，请在设置中重新进行飞书 OAuth 授权', 8000);
+      this.addLog('error', '', '同步因授权失效而中止，请重新授权');
+      await this.plugin.saveSyncRecords(syncRecords);
+      return result;
+    }
 
     // 8. 保存同步记录（已包含 saveData）
     await this.plugin.saveSyncRecords(syncRecords);
@@ -294,7 +328,19 @@ export class SyncEngine {
     // 增量判断：哈希相同且云端文件夹未变 → 还需验证云端文件是否仍然存在
     if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
       // 校验云端文件是否仍存在（可能被手动删除）
-      const cloudExists = await this.apiClient.checkFileExists(existingRecord.cloudToken, existingRecord.parentFolderToken);
+      let cloudExists: boolean;
+      try {
+        cloudExists = await this.apiClient.checkFileExists(existingRecord.cloudToken, existingRecord.parentFolderToken, file.name);
+      } catch (checkError) {
+        // 授权错误等严重错误：向上抛出，中止同步
+        const errMsg = (checkError as Error).message || '';
+        if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
+          throw checkError;
+        }
+        // 其他网络错误：保守地认为文件不存在，触发重新上传
+        console.warn(`[FeiSync] 检查云端文件存在性失败，将重新上传: ${file.path}`, checkError);
+        cloudExists = false;
+      }
       if (cloudExists) {
         console.log(`[FeiSync] 文件未变化，跳过: ${file.path}`);
         return false;
@@ -356,7 +402,17 @@ export class SyncEngine {
         await this.apiClient.deleteFile(existingRecord.cloudToken, existingRecord.cloudType);
         console.log(`[FeiSync] 旧文件已删除`);
       } catch (deleteError) {
-        console.warn(`[FeiSync] 删除旧文件失败，继续上传新版本:`, deleteError);
+        const errMsg = (deleteError as Error).message || '';
+        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+          // IP 白名单限制导致删除失败，提示用户但仍继续上传
+          console.warn(`[FeiSync] 删除旧文件失败（IP 白名单限制），将上传为新文件，旧文件需手动删除`);
+          new Notice('飞书应用 IP 白名单限制，无法删除旧版本文件。请在飞书开放平台关闭 IP 限制或添加当前 IP', 8000);
+        } else if (errMsg.includes('1061007') || errMsg.includes('file has been delete')) {
+          // 旧文件已被删除（可能被其他方式删除），视为删除成功
+          console.log(`[FeiSync] 旧文件已不存在（已被删除），视为删除成功`);
+        } else {
+          console.warn(`[FeiSync] 删除旧文件失败，继续上传新版本:`, deleteError);
+        }
       }
     } else {
       // 没有同步记录（新文件），但云端可能存在同名文件

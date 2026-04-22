@@ -89,6 +89,7 @@ export interface FeiSyncPluginSettings {
   feishuRootFolderToken: string;
   autoSyncOnChange: boolean;
   syncInterval: number;
+  enableProxy: boolean; // 是否启用代理服务器
   proxyUrl: string; // 代理服务器地址，例如 http://your-proxy.com:8080
   enableScheduledSync: boolean; // 定时同步开关
   scheduledSyncInterval: number; // 定时同步间隔（分钟）
@@ -97,6 +98,7 @@ export interface FeiSyncPluginSettings {
   maxRetryAttempts: number; // API 请求最大重试次数
   syncLog: SyncLogEntry[]; // 同步日志（持久化）
   syncRecords: Record<string, import('./syncEngine').FileSyncRecord>; // 同步记录（持久化）
+  feishuUserToken: string; // 用户授权令牌（JSON 字符串，持久化）
 }
 
 // 默认设置
@@ -108,6 +110,7 @@ const DEFAULT_SETTINGS: FeiSyncPluginSettings = {
   autoSyncOnChange: false,
   syncInterval: 5, // 分钟
   proxyUrl: '', // 代理服务器地址，留空则直连
+  enableProxy: false, // 代理开关，默认关闭
   enableScheduledSync: false,
   scheduledSyncInterval: 30, // 30 分钟
   syncOnDelete: true,
@@ -115,6 +118,7 @@ const DEFAULT_SETTINGS: FeiSyncPluginSettings = {
   maxRetryAttempts: 3,
   syncLog: [],
   syncRecords: {},
+  feishuUserToken: '', // 用户令牌 JSON，空字符串表示未授权
 };
 
 /**
@@ -278,51 +282,66 @@ export class FeiSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    // 代理服务器配置（可选，用于解决 CORS 限制）
-    const proxySetting = new Setting(containerEl)
-      .setName('代理服务器地址（可选）')
-      .setDesc('如果直接连接飞书 API 失败，请填写代理服务器地址。例如：http://your-proxy.com:8080')
-      .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
-        text.setPlaceholder('http://your-proxy.com:8080')
-          .setValue(this.plugin.settings.proxyUrl)
-          .onChange(async (value: string) => {
-            this.plugin.settings.proxyUrl = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-    // 让设置项纵向排列，输入框独占一整行
-    proxySetting.controlEl.style.flexWrap = 'wrap';
-    proxySetting.controlEl.style.width = '100%';
-
-    // 代理连接测试按钮（单独一行，避免挤压输入框）
+    // 代理服务器开关
     new Setting(containerEl)
-      .setName('代理连接测试')
-      .setDesc('测试代理服务器是否可达以及飞书 API 是否连通')
-      .addButton((button) => {
-        button.setButtonText('测试连接')
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText('测试中...');
-            const proxyUrl = this.plugin.settings.proxyUrl;
-            if (proxyUrl) {
-              // 有代理：先测本地→代理，再测代理→飞书
-              const r1 = await this.plugin.testStep('local-to-proxy');
-              if (!r1.success) {
-                new Notice(`✗ ${r1.message}`);
-              } else {
-                const r2 = await this.plugin.testStep('proxy-to-feishu');
-                new Notice(r2.success ? `✓ ${r2.message}` : `✗ 本地→代理: ${r1.message}；代理→飞书: ${r2.message}`);
-              }
-            } else {
-              // 无代理：直连飞书
-              const result = await this.plugin.testStep('direct-to-feishu');
-              new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
-            }
-            button.setDisabled(false);
-            button.setButtonText('测试连接');
+      .setName('使用代理服务器')
+      .setDesc('启用后可通过代理服务器访问飞书 API，适用于网络受限环境')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableProxy)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableProxy = value;
+            await this.plugin.saveSettings();
+            this.display();
           });
       });
+
+    // 代理服务器配置（仅当启用代理时显示）
+    if (this.plugin.settings.enableProxy) {
+      const proxySetting = new Setting(containerEl)
+        .setName('代理服务器地址')
+        .setDesc('代理服务器地址，例如：http://your-proxy.com:8080')
+        .addText((text: TextComponent) => {
+          text.inputEl.style.width = '100%';
+          text.setPlaceholder('http://your-proxy.com:8080')
+            .setValue(this.plugin.settings.proxyUrl)
+            .onChange(async (value: string) => {
+              this.plugin.settings.proxyUrl = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+      // 让设置项纵向排列，输入框独占一整行
+      proxySetting.controlEl.style.flexWrap = 'wrap';
+      proxySetting.controlEl.style.width = '100%';
+
+      // 代理连接测试按钮
+      new Setting(containerEl)
+        .setName('代理连接测试')
+        .setDesc('测试代理服务器是否可达以及飞书 API 是否连通')
+        .addButton((button) => {
+          button.setButtonText('测试连接')
+            .onClick(async () => {
+              button.setDisabled(true);
+              button.setButtonText('测试中...');
+              const proxyUrl = this.plugin.settings.proxyUrl;
+              if (proxyUrl) {
+                // 有代理：先测本地→代理，再测代理→飞书
+                const r1 = await this.plugin.testStep('local-to-proxy');
+                if (!r1.success) {
+                  new Notice(`✗ ${r1.message}`);
+                } else {
+                  const r2 = await this.plugin.testStep('proxy-to-feishu');
+                  new Notice(r2.success ? `✓ ${r2.message}` : `✗ 本地→代理: ${r1.message}；代理→飞书: ${r2.message}`);
+                }
+              } else {
+                // 无代理：直连飞书
+                const result = await this.plugin.testStep('direct-to-feishu');
+                new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
+              }
+              button.setDisabled(false);
+              button.setButtonText('测试连接');
+            });
+        });
+    }
 
     // 本地文件夹路径（输入框 + 浏览按钮）
     let folderTextComp: TextComponent;

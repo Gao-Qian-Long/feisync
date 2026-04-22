@@ -3,7 +3,7 @@
  * 将本地 Obsidian 笔记同步到飞书 Drive
  */
 
-import { Plugin, Notice, Menu } from 'obsidian';
+import { Plugin, Notice, Menu, requestUrl } from 'obsidian';
 import { FeiSyncPluginSettings, FeiSyncSettingTab, getDefaultSettings } from './settings';
 import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
@@ -97,6 +97,14 @@ export default class FeiSyncPlugin extends Plugin {
   }
 
   /**
+   * 获取实际使用的代理地址
+   * 仅当 enableProxy 开关开启时才返回 proxyUrl，否则返回空字符串（直连）
+   */
+  getEffectiveProxyUrl(): string {
+    return this.settings.enableProxy ? this.settings.proxyUrl : '';
+  }
+
+  /**
    * 加载设置
    */
   async loadSettings(): Promise<void> {
@@ -138,20 +146,20 @@ export default class FeiSyncPlugin extends Plugin {
       // 如果认证信息变更，更新或创建 authManager
       if (this.settings.appId && this.settings.appSecret) {
         if (this.authManager) {
-          this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.settings.proxyUrl);
+          this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl());
         } else {
           this.authManager = new FeishuAuthManager(
-            this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+            this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
             () => this.saveUserToken()
           );
-          this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl, this.settings.maxRetryAttempts);
+          this.apiClient = new FeishuApiClient(this.authManager, this.getEffectiveProxyUrl(), this.settings.maxRetryAttempts);
           this.syncEngine = new SyncEngine(this, this.apiClient);
         }
       }
 
       // 更新 API 客户端配置
       if (this.apiClient) {
-        this.apiClient.updateProxyUrl(this.settings.proxyUrl);
+        this.apiClient.updateProxyUrl(this.getEffectiveProxyUrl());
         this.apiClient.updateMaxRetries(this.settings.maxRetryAttempts);
       }
 
@@ -171,15 +179,15 @@ export default class FeiSyncPlugin extends Plugin {
   private async initializeModules(): Promise<void> {
     // 认证管理器
     if (this.settings.appId && this.settings.appSecret) {
-      this.authManager = new FeishuAuthManager(
-        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
-        () => this.saveUserToken()
-      );
+        this.authManager = new FeishuAuthManager(
+          this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
+          () => this.saveUserToken()
+        );
     }
 
     // API 客户端
     if (this.authManager) {
-      this.apiClient = new FeishuApiClient(this.authManager, this.settings.proxyUrl, this.settings.maxRetryAttempts);
+      this.apiClient = new FeishuApiClient(this.authManager, this.getEffectiveProxyUrl(), this.settings.maxRetryAttempts);
     }
 
     // 同步引擎
@@ -195,13 +203,13 @@ export default class FeiSyncPlugin extends Plugin {
   }
 
   /**
-   * 从数据文件加载用户令牌
+   * 从设置中加载用户令牌
    */
   private async loadUserToken(): Promise<void> {
     try {
-      const data = await this.loadData();
-      if (data && data.feishuUserToken) {
-        const tokenInfo = JSON.parse(data.feishuUserToken);
+      const tokenStr = this.settings.feishuUserToken;
+      if (tokenStr) {
+        const tokenInfo = JSON.parse(tokenStr);
         if (tokenInfo) {
           this.authManager?.loadUserTokenFromData(tokenInfo);
         }
@@ -212,17 +220,27 @@ export default class FeiSyncPlugin extends Plugin {
   }
 
   /**
-   * 保存用户令牌到数据文件
+   * 保存用户令牌到设置
    */
   async saveUserToken(): Promise<void> {
     if (this.authManager?.isUserAuthorized()) {
       try {
-        const data = await this.loadData();
-        data.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
-        await this.saveData(data);
+        this.settings.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
+        await this.saveData(this.settings);
         console.log('[FeiSync] 用户令牌已保存');
       } catch (error) {
         console.error('[FeiSync] 保存用户令牌失败:', error);
+      }
+    } else {
+      // token 已被清除（如 refresh_token 失效），需要从设置中移除旧 token
+      if (this.settings.feishuUserToken) {
+        try {
+          this.settings.feishuUserToken = '';
+          await this.saveData(this.settings);
+          console.log('[FeiSync] 已从存储中移除失效的用户令牌');
+        } catch (error) {
+          console.error('[FeiSync] 移除用户令牌失败:', error);
+        }
       }
     }
   }
@@ -337,33 +355,28 @@ export default class FeiSyncPlugin extends Plugin {
    * 测试连接（单步）
    */
   async testStep(step: 'local-to-proxy' | 'proxy-to-feishu' | 'direct-to-feishu'): Promise<{ success: boolean; message: string }> {
-    const proxyUrl = this.settings.proxyUrl;
+    const proxyUrl = this.getEffectiveProxyUrl();
 
     if (step === 'local-to-proxy') {
       if (!proxyUrl) {
         return { success: false, message: '未配置代理服务器地址' };
       }
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        const response = await fetch(proxyUrl, {
+        const response = await requestUrl({
+          url: proxyUrl,
           method: 'GET',
-          signal: controller.signal,
+          throw: false,
         });
-        clearTimeout(timeoutId);
         return { success: true, message: `代理服务器可达（HTTP ${response.status}）` };
       } catch (error) {
         const msg = (error as Error).message;
-        if (msg.includes('abort')) {
-          return { success: false, message: '连接代理服务器超时（10秒）' };
-        }
         return { success: false, message: `无法连接代理服务器: ${msg}` };
       }
     }
 
     if (!this.authManager && this.settings.appId && this.settings.appSecret) {
       this.authManager = new FeishuAuthManager(
-        this.settings.appId, this.settings.appSecret, this.settings.proxyUrl,
+        this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
         () => this.saveUserToken()
       );
     }
@@ -373,7 +386,7 @@ export default class FeiSyncPlugin extends Plugin {
 
     try {
       const token = await this.authManager.getAccessToken();
-      const isValid = await validateToken(token, this.settings.proxyUrl);
+      const isValid = await validateToken(token, this.getEffectiveProxyUrl());
       if (isValid) {
         const via = proxyUrl ? `经由代理 (${proxyUrl})` : '直连';
         return { success: true, message: `飞书 API 连接成功（${via}），凭证有效` };
