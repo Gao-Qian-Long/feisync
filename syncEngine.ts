@@ -423,8 +423,12 @@ export class SyncEngine {
     localFolderPath: string,
     result: SyncResult
   ): Promise<void> {
-    // 构建本地文件名集合
-    const localFileNames = new Set(localFiles.map(f => f.name));
+    // 构建本地文件名集合（包含去扩展名形式，匹配飞书可能的命名差异）
+    const localFileNames = new Set<string>();
+    for (const f of localFiles) {
+      localFileNames.add(f.name);
+      localFileNames.add(f.name.replace(/\.[^.]+$/, ''));
+    }
 
     for (const cloudFile of cloudFiles) {
       // 只处理文件，不处理文件夹
@@ -472,10 +476,11 @@ export class SyncEngine {
     const pool = new ConcurrencyPool(this.plugin.settings.maxConcurrentUploads);
     let authError: Error | null = null;
     let ipDeniedError = false;
+    let shouldStop = false; // 共享停止标志，避免竞态
 
     const uploadPromises = localFiles.map(file =>
       pool.run(async () => {
-        if (authError || ipDeniedError) return;
+        if (shouldStop) return;
         try {
           const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, cloudFiles);
           if (uploaded) {
@@ -484,9 +489,11 @@ export class SyncEngine {
             result.skippedCount++;
           }
         } catch (error) {
+          if (shouldStop) return;
           const errMsg = (error as Error).message || '';
           if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
             authError = error as Error;
+            shouldStop = true;
             result.failedCount++;
             result.errors.push(`授权已失效，同步中止: ${errMsg}`);
             this.addLog('error', file.path, errMsg);
@@ -494,6 +501,7 @@ export class SyncEngine {
           }
           if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
             ipDeniedError = true;
+            shouldStop = true;
             result.failedCount++;
             result.errors.push(`飞书应用 IP 白名单限制，同步中止`);
             this.addLog('error', file.path, 'IP 白名单限制');

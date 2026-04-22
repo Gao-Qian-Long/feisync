@@ -55,6 +55,21 @@ export class FeishuAuthManager {
   }
 
   /**
+   * 仅在凭证确实变更时才更新，避免不必要的 token 刷新
+   * @returns true 表示凭证已变更并更新，false 表示未变更
+   */
+  updateCredentialsIfNeeded(appId: string, appSecret: string, proxyUrl: string = ''): boolean {
+    if (this.appId === appId && this.appSecret === appSecret && this.proxyUrl === proxyUrl) {
+      return false;
+    }
+    this.appId = appId;
+    this.appSecret = appSecret;
+    this.proxyUrl = proxyUrl;
+    this.clearCache();
+    return true;
+  }
+
+  /**
    * 获取完整的 API URL（如果配置了代理则使用代理）
    */
   private getApiUrl(path: string): string {
@@ -118,7 +133,7 @@ export class FeishuAuthManager {
     return await this.fetchNewToken();
   }
 
-/**
+  /**
    * 调用飞书认证端点获取令牌
    */
   private async fetchNewToken(): Promise<string> {

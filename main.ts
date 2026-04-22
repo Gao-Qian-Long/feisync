@@ -114,7 +114,17 @@ export default class FeiSyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     try {
       const loadedData = await this.loadData();
-      this.settings = Object.assign({}, getDefaultSettings(), loadedData);
+      const defaults = getDefaultSettings();
+      // 过滤掉 loadedData 中 undefined 的值，避免覆盖默认值
+      const filteredData: Partial<FeiSyncPluginSettings> = {};
+      if (loadedData) {
+        for (const key of Object.keys(defaults) as (keyof FeiSyncPluginSettings)[]) {
+          if (loadedData[key] !== undefined) {
+            (filteredData as any)[key] = loadedData[key];
+          }
+        }
+      }
+      this.settings = { ...defaults, ...filteredData };
       // 确保 syncLog 是数组
       if (!Array.isArray(this.settings.syncLog)) {
         this.settings.syncLog = [];
@@ -164,7 +174,15 @@ export default class FeiSyncPlugin extends Plugin {
       // 如果认证信息变更，更新或创建 authManager
       if (this.settings.appId && this.settings.appSecret) {
         if (this.authManager) {
-          this.authManager.updateCredentials(this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl());
+          // 仅在凭证确实变更时才更新，避免不必要的 token 刷新
+          const currentProxy = this.getEffectiveProxyUrl();
+          const needUpdate = this.authManager.updateCredentialsIfNeeded(
+            this.settings.appId, this.settings.appSecret, currentProxy
+          );
+          if (needUpdate) {
+            this.apiClient = new FeishuApiClient(this.authManager, currentProxy, this.settings.maxRetryAttempts);
+            this.syncEngine = new SyncEngine(this, this.apiClient);
+          }
         } else {
           this.authManager = new FeishuAuthManager(
             this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
@@ -199,11 +217,11 @@ export default class FeiSyncPlugin extends Plugin {
 
     // 认证管理器
     if (this.settings.appId && this.settings.appSecret) {
-        this.authManager = new FeishuAuthManager(
-          this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
-          () => this.saveUserToken()
-        );
-        log.debug('认证管理器已初始化');
+      this.authManager = new FeishuAuthManager(
+        this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
+        () => this.saveUserToken()
+      );
+      log.debug('认证管理器已初始化');
     }
 
     // API 客户端

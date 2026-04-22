@@ -57,7 +57,7 @@ class RateLimiter {
       if (this.timestamps.length >= this.maxRequests) {
         // 需要等待直到最早的请求超出窗口
         const oldestInWindow = this.timestamps[0];
-        const waitTime = this.windowMs - (now - oldestInWindow) + 10; // 额外10ms缓冲
+        const waitTime = Math.max(0, this.windowMs - (now - oldestInWindow)) + 10; // 额外10ms缓冲
         log.debug(`速率限制：等待 ${waitTime}ms`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         // 等待结束后，由链中的下一个 .then() 重新检查并记录
@@ -68,6 +68,9 @@ class RateLimiter {
     await this.lock;
   }
 }
+
+// 不重试的错误模式：认证错误、权限错误、参数错误、文件已删除、IP 限制
+const NO_RETRY_PATTERNS = ['1061007', 'file has been delete', '99991401', 'is denied by app setting', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
 
 /**
  * 带重试的请求执行器
@@ -86,9 +89,7 @@ async function withRetry<T>(
       lastError = error as Error;
       const msg = lastError.message || '';
 
-      // 不重试的错误：认证错误、权限错误、参数错误、文件已删除、IP 限制
-      const noRetryPatterns = ['1061007', 'file has been delete', '99991401', 'is denied by app setting', 'invalid', 'unauthorized', 'permission', '参数', '权限'];
-      const shouldNotRetry = noRetryPatterns.some(p => msg.toLowerCase().includes(p.toLowerCase()));
+      const shouldNotRetry = NO_RETRY_PATTERNS.some(p => msg.toLowerCase().includes(p));
       if (shouldNotRetry) {
         break;
       }

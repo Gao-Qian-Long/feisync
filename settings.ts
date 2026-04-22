@@ -276,11 +276,13 @@ export function getDefaultSettings(): FeiSyncPluginSettings {
  * 文件夹路径输入建议器
  */
 class FolderSuggest extends AbstractInputSuggest<TFolder> {
+  private cachedFolders: TFolder[] | null = null;
+
   constructor(app: App, inputEl: HTMLInputElement) {
     super(app, inputEl);
   }
 
-  getSuggestions(query: string): TFolder[] {
+  private buildFolderList(): TFolder[] {
     const allFolders: TFolder[] = [];
     const queue: TFolder[] = [this.app.vault.getRoot()];
     while (queue.length > 0) {
@@ -292,12 +294,19 @@ class FolderSuggest extends AbstractInputSuggest<TFolder> {
         }
       }
     }
+    return allFolders;
+  }
+
+  getSuggestions(query: string): TFolder[] {
+    if (!this.cachedFolders) {
+      this.cachedFolders = this.buildFolderList();
+    }
 
     if (!query) {
-      return allFolders;
+      return this.cachedFolders;
     }
     const lowerQuery = query.toLowerCase();
-    return allFolders.filter(f => f.path.toLowerCase().includes(lowerQuery));
+    return this.cachedFolders.filter(f => f.path.toLowerCase().includes(lowerQuery));
   }
 
   renderSuggestion(value: TFolder, el: HTMLElement): void {
@@ -641,7 +650,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         deleteBtn.style.cursor = 'pointer';
         deleteBtn.title = '删除此映射';
         deleteBtn.addEventListener('click', async () => {
-          this.plugin.settings.syncFolders.splice(i, 1);
+          this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(c => c.localPath !== config.localPath);
           await this.plugin.saveSettings();
           this.display();
         });
