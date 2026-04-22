@@ -7,16 +7,19 @@
 ## 核心设计决策
 
 1. **上传为普通文件**：使用 `upload_all` API，`parent_type` 设为 `explorer`，文件会上传到云空间作为普通文件，而非云文档。
-2. **文件大小限制**：飞书 API 限制单个文件 ≤20MB。
+2. **文件大小限制**：
+   - 全量上传：单个文件 ≤20MB
+   - 分片上传：>20MB 文件使用分片上传，无大小上限
 3. **覆盖策略**：如果云端存在同名文件，先删除旧文件，再上传新文件。
+4. **并发控制**：支持配置最大并发上传数，默认 3。
 
 ## API 端点
 
-```
-POST https://open.feishu.cn/open-apis/drive/v1/medias/upload_all
-```
+### 全量上传（≤20MB）
 
-### 请求参数
+```
+POST https://open.feishu.cn/open-apis/drive/v1/files/upload_all
+```
 
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
@@ -24,15 +27,41 @@ POST https://open.feishu.cn/open-apis/drive/v1/medias/upload_all
 | `parent_type` | string | 是 | 固定填 `explorer`，表示上传到云空间 |
 | `parent_node` | string | 是 | 目标文件夹的 token |
 | `size` | number | 是 | 文件大小（字节），最大 20971520（20MB） |
+| `file_type` | string | 是 | 文件类型（docx/xlsx/sheet 等） |
 | `file` | binary | 是 | 文件的二进制内容 |
 
-### 响应
+### 分片上传（>20MB）
 
-上传成功后，返回 `file_token`，可用于下载或获取文件元信息。
+#### 1. 预上传
+
+```
+POST https://open.feishu.cn/open-apis/drive/v1/files/upload_prepare
+```
+
+#### 2. 分片上传
+
+```
+POST https://open.feishu.cn/open-apis/drive/v1/files/upload_block
+```
+
+#### 3. 完成上传
+
+```
+POST https://open.feishu.cn/open-apis/drive/v1/files/upload_finish
+```
 
 ## 实现
 
-### FeishuApiClient.uploadFile()
+### 文件大小检查
+
+```typescript
+checkFileSize(sizeInBytes: number): boolean {
+  const limitBytes = 20 * 1024 * 1024; // 20MB
+  return sizeInBytes <= limitBytes;
+}
+```
+
+### 上传流程
 
 ```typescript
 async uploadFile(
@@ -41,122 +70,97 @@ async uploadFile(
   parentFolderToken: string,
   size: number
 ): Promise<string> {
-  const token = await this.authManager.getAccessToken();
-
-  const formData = new FormData();
-  formData.append('file_name', fileName);
-  formData.append('parent_type', 'explorer');  // 关键：上传为普通文件
-  formData.append('parent_node', parentFolderToken);
-  formData.append('size', size.toString());
-
-  const blob = new Blob([fileContent]);
-  formData.append('file', blob, fileName);
-
-  const response = await fetch(
-    this.getApiUrl('/open-apis/drive/v1/medias/upload_all'),
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: formData,
-    }
-  );
-
-  const data = await response.json();
-  if (data.code !== 0) {
-    throw new Error(`上传文件失败: ${data.msg}`);
+  // 1. 检查文件大小
+  if (this.checkFileSize(size)) {
+    // 2a. 全量上传
+    return await this.uploadFileAll(fileContent, fileName, parentFolderToken, size);
+  } else {
+    // 2b. 分片上传
+    return await this.uploadFileChunked(fileContent, fileName, parentFolderToken, size);
   }
-
-  return data.data.file_token;
 }
+```
+
+## 云端文件查重优化
+
+### 问题
+
+传统方案对每个新文件调用 `findFileByName()` API 查询云端是否有同名文件，时间复杂度 O(n)。
+
+### 优化方案
+
+在 `syncFolder()` 开始时预获取云端文件列表，后续查重用内存查找替代 API 调用，时间复杂度 O(1)。
+
+```typescript
+// syncFolder() 中
+let cloudFiles: FeishuFileMeta[] | undefined;
+if (localFiles.length > 0) {
+  cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+}
+
+// syncFile() 中
+const existingFile = cloudFiles
+  ? cloudFiles.find(f => f.name === file.name || ...)
+  : await this.apiClient.findFileByName(file.name, parentFolderToken);
 ```
 
 ## 文件覆盖策略
 
 由于飞书 API 不支持直接覆盖同名文件，采用以下策略：
 
-1. **查找同名文件**：调用 `listFolderContents` 获取文件夹内容，查找同名文件。
+1. **查找同名文件**：优先使用预获取的云端文件列表，否则调用 `listFolderContents`。
 2. **删除旧文件**：如果存在，调用 `deleteFile` 删除旧文件。
 3. **上传新文件**：调用 `uploadFile` 上传新文件。
 
-### FeishuApiClient.deleteFile()
+### 错误处理
 
-```typescript
-async deleteFile(fileToken: string, fileType: string = 'file'): Promise<void> {
-  const headers = await this.getHeaders();
-  // 注意：type 是查询参数
-  const endpoint = this.getApiUrl(
-    `/open-apis/drive/v1/files/${fileToken}?type=${fileType}`
-  );
-
-  const data = await this.fetchWithTimeout(endpoint, {
-    method: 'DELETE',
-    headers,
-  });
-
-  if (data.code !== 0) {
-    throw new Error(`删除文件失败: ${data.msg}`);
-  }
-}
-```
-
-## 文件大小检查
-
-```typescript
-checkFileSize(sizeInBytes: number): boolean {
-  const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
-  return sizeInBytes <= MAX_SIZE;
-}
-```
-
-## 同步引擎中的使用
-
-```typescript
-private async uploadSingleFile(file: TFile, parentFolderToken: string): Promise<void> {
-  // 1. 读取文件内容
-  const content = await this.vault.read(file);
-  const fileSize = new Blob([content]).size;
-
-  // 2. 检查文件大小
-  if (!this.apiClient.checkFileSize(fileSize)) {
-    throw new Error('文件大小超过20MB限制');
-  }
-
-  // 3. 检查云端是否已存在同名文件
-  const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
-
-  if (existingFile) {
-    // 4a. 删除旧文件
-    await this.apiClient.deleteFile(existingFile.token, existingFile.type);
-  }
-
-  // 5. 上传新文件
-  const fileBuffer = new TextEncoder().encode(content).buffer;
-  await this.apiClient.uploadFile(
-    new Uint8Array(fileBuffer),
-    file.name,
-    parentFolderToken,
-    fileSize
-  );
-}
-```
+| 错误类型 | 处理方式 |
+|----------|----------|
+| IP 白名单限制（99991401） | 提示用户，继续上传为新文件 |
+| 文件已不存在（1061007） | 静默处理，视为删除成功 |
+| 其他删除错误 | 记录警告，继续上传新文件 |
 
 ## 支持的文件类型
 
 插件支持以下类型的文件上传：
 
-| 类型 | 扩展名 | 读取方式 |
-|------|--------|----------|
-| 文本文件 | `md`, `txt`, `json`, `yml`, `yaml` 等 | `vault.read()` |
-| 二进制文件 | `docx`, `doc`, `xlsx`, `xls`, `pdf`, `png`, `jpg`, `gif`, `zip` 等 | `vault.readBinary()` |
+| 类型 | 扩展名 | file_type |
+|------|--------|-----------|
+| 文本文件 | `md`, `txt`, `json`, `yml`, `yaml` 等 | `file` |
+| Word 文档 | `docx`, `doc` | `docx` |
+| Excel 表格 | `xlsx`, `xls` | `sheet` |
+| PowerPoint | `pptx`, `ppt` | `docx` |
+| PDF | `pdf` | `file` |
+| 图片 | `png`, `jpg`, `gif`, `webp` | `file` |
+| 压缩包 | `zip`, `rar`, `7z` | `file` |
 
-## 错误处理
+## 速率限制
 
-- **文件大小超限**：抛出明确错误。
-- **网络错误**：由调用方处理重试。
-- **令牌过期**：由 `authManager` 自动刷新。
-- **删除失败**：记录警告，但继续上传新文件。
+- 飞书 API 限制：5 QPS
+- 实现：RateLimiter 使用 Promise 链互斥锁实现线程安全限流
+
+```typescript
+class RateLimiter {
+  private timestamps: number[] = [];
+  private lock: Promise<void> = Promise.resolve();
+
+  async acquire(): Promise<void> {
+    this.lock = this.lock.then(async () => {
+      // 清理超出窗口的时间戳
+      this.timestamps = this.timestamps.filter(t => Date.now() - t < this.windowMs);
+      
+      if (this.timestamps.length >= this.maxRequests) {
+        // 等待直到最早的请求超出窗口
+        const waitTime = this.windowMs - (Date.now() - this.timestamps[0]) + 10;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+      
+      this.timestamps.push(Date.now());
+    });
+    await this.lock;
+  }
+}
+```
 
 ## 注意事项
 

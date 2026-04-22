@@ -15,7 +15,8 @@
 | 文件存储位置 | 应用创建的文件夹 | 用户个人文件夹 |
 | UI 可见性 | 不可见（仅 API 管理） | 可见（用户可在飞书客户端看到） |
 | 权限来源 | 应用权限 | 用户授权 + 应用权限 |
-| 刷新方式 | 自动过期刷新 | 需要用户重新授权 |
+| 刷新方式 | 自动过期刷新 | refresh_token 自动刷新 |
+| IP 白名单 | 需要 | 不需要 |
 
 ## API 端点
 
@@ -25,12 +26,23 @@
 POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal
 ```
 
-### 2. 获取 user_access_token
+### 2. 获取 app_access_token
 
-用户授权流程（通过 OAuth 2.0）：
-1. 引导用户访问授权页面
-2. 用户授权后，获取 authorization_code
-3. 使用 code 换取 user_access_token
+```
+POST https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal
+```
+
+### 3. OAuth 用户授权
+
+```
+GET https://open.feishu.cn/open-apis/authen/v1/authorize
+```
+
+### 4. 授权码换令牌 / 刷新令牌
+
+```
+POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
+```
 
 ## 实现
 
@@ -47,13 +59,13 @@ export class FeishuAuthManager {
   private tokenExpiry: number | null = null;
 
   // user_access_token
-  private userAccessToken: string | null = null;
-  private userTokenExpiry: number | null = null;
+  private userTokenInfo: UserTokenInfo | null = null;
+  private oauthState: string = '';
+  private refreshPromise: Promise<UserTokenInfo> | null = null;
+  private _wasUserAuthorized: boolean = false;
 
-  constructor(appId: string, appSecret: string, proxyUrl: string = '') {
-    this.appId = appId;
-    this.appSecret = appSecret;
-    this.proxyUrl = proxyUrl;
+  constructor(appId: string, appSecret: string, proxyUrl: string = '', onTokenChange?: () => Promise<void>) {
+    // ...
   }
 
   /**
@@ -63,109 +75,146 @@ export class FeishuAuthManager {
     if (this.isTokenValid()) {
       return this.cachedToken!;
     }
-    return await this.fetchTenantToken();
+    return await this.fetchNewToken();
   }
 
   /**
-   * 获取用户访问凭证
-   * 如果已授权且未过期，直接返回；否则需要用户重新授权
+   * 获取用户访问凭证（自动刷新）
    */
   async getUserAccessToken(): Promise<string> {
-    if (this.isUserTokenValid()) {
-      return this.userAccessToken!;
-    }
-    throw new Error('用户未授权或授权已过期');
-  }
-
-  /**
-   * 检查用户是否已授权
-   */
-  isUserAuthorized(): boolean {
-    return this.isUserTokenValid();
-  }
-
-  /**
-   * 检查 tenant token 是否有效
-   */
-  private isTokenValid(): boolean {
-    if (!this.cachedToken || !this.tokenExpiry) {
-      return false;
-    }
-    return Date.now() < this.tokenExpiry;
-  }
-
-  /**
-   * 检查 user token 是否有效
-   */
-  private isUserTokenValid(): boolean {
-    if (!this.userAccessToken || !this.userTokenExpiry) {
-      return false;
-    }
-    return Date.now() < this.userTokenExpiry;
-  }
-
-  /**
-   * 获取 tenant_access_token
-   */
-  private async fetchTenantToken(): Promise<string> {
-    const url = this.getApiUrl('/open-apis/auth/v3/tenant_access_token/internal');
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        app_id: this.appId,
-        app_secret: this.appSecret,
-      }),
-    });
-
-    const data = await response.json();
-    if (data.code !== 0) {
-      throw new Error(`获取令牌失败: ${data.msg}`);
+    if (!this.userTokenInfo) {
+      throw new Error('用户未授权，请先进行 OAuth 授权');
     }
 
-    // 令牌有效期为 2 小时（7200 秒），提前 5 分钟过期
-    this.cachedToken = data.tenant_access_token;
-    this.tokenExpiry = Date.now() + (7200 - 300) * 1000;
-
-    return this.cachedToken;
-  }
-
-  /**
-   * 获取 API URL（支持代理）
-   */
-  private getApiUrl(path: string): string {
-    if (this.proxyUrl) {
-      const baseUrl = this.proxyUrl.replace(/\/$/, '');
-      const apiPath = path.startsWith('/') ? path : '/' + path;
-      return `${baseUrl}${apiPath}`;
+    // 检查是否即将过期（5分钟内），如果快过期了先刷新
+    if (Date.now() > this.userTokenInfo.expiresAt - 5 * 60 * 1000) {
+      // 刷新锁：如果已有刷新操作在进行中，等待它完成
+      if (!this.refreshPromise) {
+        this.refreshPromise = this.doRefreshUserToken().finally(() => {
+          this.refreshPromise = null;
+        });
+      } else {
+        await this.refreshPromise;
+      }
     }
-    return `https://open.feishu.cn${path}`;
-  }
 
-  /**
-   * 更新凭证
-   */
-  updateCredentials(appId: string, appSecret: string, proxyUrl: string): void {
-    this.appId = appId;
-    this.appSecret = appSecret;
-    this.proxyUrl = proxyUrl;
-    this.clearCache();
-  }
-
-  /**
-   * 清除缓存
-   */
-  clearCache(): void {
-    this.cachedToken = null;
-    this.tokenExpiry = null;
-    this.userAccessToken = null;
-    this.userTokenExpiry = null;
+    return this.userTokenInfo.accessToken;
   }
 }
 ```
 
-## token 选择策略
+## 用户令牌信息结构
+
+```typescript
+export interface UserTokenInfo {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;  // 毫秒时间戳
+  openId?: string;
+  unionId?: string;
+}
+```
+
+## OAuth 授权流程
+
+### 1. 生成授权 URL
+
+```typescript
+generateOAuthUrl(redirectUri: string = 'http://localhost:9527/callback'): string {
+  this.oauthState = this.generateRandomString(32);
+  
+  const scope = 'drive:drive drive:export:readonly drive:file:download docx:document docs:document:import docs:document:export offline_access';
+  
+  const params = new URLSearchParams({
+    app_id: this.appId,
+    redirect_uri: redirectUri,
+    state: this.oauthState,
+    response_type: 'code',
+    scope: scope,
+  });
+  
+  return this.getApiUrl('/open-apis/authen/v1/authorize') + '?' + params.toString();
+}
+```
+
+### 2. 启动本地回调服务器
+
+```typescript
+async startLocalCallbackServer(port: number = 9527): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const reqUrl = new URL(req.url || '/', `http://localhost:${port}`);
+      const code = reqUrl.searchParams.get('code');
+      const state = reqUrl.searchParams.get('state');
+      
+      // 校验 state，防止 CSRF
+      if (state !== this.oauthState) {
+        reject(new Error('OAuth state 校验失败'));
+        return;
+      }
+      
+      if (code) {
+        resolve(code);
+      }
+    });
+    
+    // 超时处理：3 分钟
+    server.listen(port);
+  });
+}
+```
+
+### 3. 交换授权码获取令牌
+
+```typescript
+async exchangeCodeForUserToken(code: string, redirectUri: string): Promise<UserTokenInfo> {
+  const payload = {
+    grant_type: 'authorization_code',
+    client_id: this.appId,
+    client_secret: this.appSecret,
+    code: code,
+    redirect_uri: redirectUri,
+  };
+  
+  const response = await requestUrl({
+    url: this.getApiUrl('/open-apis/authen/v2/oauth/token'),
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  
+  const result = response.json.data || response.json;
+  return {
+    accessToken: result.access_token,
+    refreshToken: result.refresh_token,
+    expiresAt: Date.now() + (result.expires_in - 300) * 1000,
+    openId: result.open_id,
+    unionId: result.union_id,
+  };
+}
+```
+
+## 令牌刷新机制
+
+```typescript
+private async doRefreshUserToken(): Promise<UserTokenInfo> {
+  try {
+    return await this.refreshUserToken();
+  } catch (error) {
+    const errMsg = (error as Error).message || '';
+    
+    if (errMsg.includes('invalid_grant') || errMsg.includes('revoked') || errMsg.includes('20064')) {
+      // refresh_token 已被撤销，需要重新授权
+      this.clearUserToken();
+      await this.onTokenChange?.();
+      throw new Error('用户令牌已过期且刷新失败，请重新授权');
+    }
+    
+    throw new Error('用户令牌已过期，请重新授权');
+  }
+}
+```
+
+## 令牌选择策略
 
 在调用 API 时，优先使用 user_access_token（如果已授权），否则使用 tenant_access_token：
 
@@ -173,7 +222,7 @@ export class FeishuAuthManager {
 private async getHeaders(): Promise<Record<string, string>> {
   let token: string;
   
-  if (this.authManager.isUserAuthorized()) {
+  if (this.authManager.wasUserAuthorized()) {
     try {
       token = await this.authManager.getUserAccessToken();
     } catch {
@@ -193,27 +242,23 @@ private async getHeaders(): Promise<Record<string, string>> {
 
 ## 令牌持久化
 
-- **tenant_access_token**：不持久化，每次启动时重新获取（有效期 2 小时足够）。
-- **user_access_token**：需要持久化，以便下次启动时恢复。使用 `plugin.loadData()` / `plugin.saveData()` 存储。
-
 ```typescript
-// 恢复用户令牌
-async loadUserToken(): Promise<void> {
-  const data = await this.loadData();
-  if (data?.feshuUserToken) {
-    const tokenInfo = JSON.parse(data.feshuUserToken);
-    if (tokenInfo.expiresAt > Date.now()) {
-      this.authManager.loadUserToken(tokenInfo);
-    }
+// 保存用户令牌
+saveUserTokenToStorage(storage: any): void {
+  if (this.userTokenInfo) {
+    storage.set('feishuUserToken', JSON.stringify(this.userTokenInfo));
   }
 }
 
-// 保存用户令牌
-async saveUserToken(): Promise<void> {
-  if (this.authManager.isUserAuthorized()) {
-    const data = await this.loadData();
-    data.feshuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
-    await this.saveData(data);
+// 从存储恢复用户令牌
+loadUserTokenFromStorage(storage: any): void {
+  const saved = storage.getString('feishuUserToken');
+  if (saved) {
+    const tokenInfo = JSON.parse(saved) as UserTokenInfo;
+    if (tokenInfo.refreshToken) {
+      this.userTokenInfo = tokenInfo;
+      this._wasUserAuthorized = true;
+    }
   }
 }
 ```
@@ -222,14 +267,16 @@ async saveUserToken(): Promise<void> {
 
 | 错误类型 | 处理方式 |
 |----------|----------|
-| 网络错误 | 抛出异常，上层处理重试 |
+| 网络错误 | 重试 2 次后抛出异常 |
 | 凭证错误 | 提示用户检查 App ID 和 App Secret |
 | 令牌过期 | 自动刷新 |
+| refresh_token 失效 | 清除令牌，提示重新授权 |
 | 用户未授权 | 提示用户进行授权 |
 
 ## 安全考虑
 
 1. **App Secret**：存储在插件设置中，用户应妥善保管。
-2. **令牌**：仅在内存中缓存，不写入磁盘（user_token 除外）。
+2. **令牌**：仅在内存中缓存，令牌信息写入本地存储。
 3. **代理**：如果使用代理，确保代理服务器可信。
 4. **HTTPS**：所有 API 调用均通过 HTTPS。
+5. **OAuth State**：使用随机字符串防止 CSRF 攻击。

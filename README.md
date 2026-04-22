@@ -6,7 +6,7 @@
 
 - **单向同步**：以本地文件为准，将 Obsidian 笔记同步到飞书 Drive
 - **增量同步**：基于文件内容哈希跳过未修改文件，只上传有变化的文件
-- **指定文件夹同步**：只同步您选择的本地文件夹
+- **多文件夹同步**：支持同时配置多个本地文件夹到飞书的不同目标文件夹
 - **手动同步**：通过命令面板或 Ribbon 图标手动触发同步
 - **自动同步**（可选）：监听文件变化，自动上传修改后的文件
 - **定时同步**（可选）：按固定间隔自动执行同步
@@ -15,6 +15,7 @@
 - **代理服务器支持**（可选）：网络受限环境可通过反向代理访问飞书 API
 - **分片上传**：大文件自动分片上传，无大小上限
 - **同步删除**：本地文件删除时可选同步删除云端文件
+- **忽略规则**：支持 `.feisyncignore` 文件配置忽略规则，语法兼容 gitignore
 
 ---
 
@@ -72,9 +73,10 @@
 1. 在 Obsidian 中打开「设置」→「FeiSync」
 2. **飞书 App ID**：填入第一步获取的 App ID
 3. **飞书 App Secret**：填入第一步获取的 App Secret
-4. **本地同步文件夹**：选择要同步到飞书的本地文件夹
-5. **飞书目标文件夹 Token**（可选）：填入飞书 Drive 中目标文件夹的 token。留空则自动在根目录创建 "ObsidianSync" 文件夹
-   > 文件夹 Token 可以直接在文件夹网页版 URL 的 code 字段获取，例如：`https://feishu.cn/drive/folder/fldcnXXXXXX` 中的 `fldcnXXXXXX`
+4. **飞书目标文件夹**：点击「选择文件夹」浏览并选择飞书云空间中的目标文件夹，或留空自动创建 "ObsidianSync" 文件夹
+5. **同步文件夹配置**：添加要同步的本地文件夹
+   - 支持多文件夹配置，每个配置可指定不同的本地路径和飞书目标文件夹
+   - 支持自动模式（自动创建同名文件夹）和自定义模式（指定已有文件夹）
 
 ### 第五步：用户授权
 
@@ -91,6 +93,28 @@
 ### 完成！
 
 完成以上步骤后，您就可以开始同步了。点击设置页面的「立即同步」按钮，或使用命令面板执行 "FeiSync: Sync now"。
+
+---
+
+## 忽略规则
+
+插件支持 `.feisyncignore` 文件来排除不需要同步的文件和文件夹。
+
+### 规则语法（兼容 gitignore）
+
+```
+# 注释行（以 # 开头）
+*.log           # 忽略所有 .log 文件
+node_modules/   # 忽略 node_modules 文件夹
+**/.DS_Store    # 忽略任意位置的 .DS_Store
+!important.md   # 取消忽略 important.md（即使之前被 *.md 规则匹配）
+```
+
+### 创建忽略规则
+
+1. 在 Obsidian 仓库根目录创建 `.feisyncignore` 文件
+2. 添加要忽略的文件或文件夹规则
+3. 规则变更后会自动生效
 
 ---
 
@@ -292,22 +316,38 @@ curl -X POST http://localhost:8080/open-apis/auth/v3/tenant_access_token/interna
 
 ## 使用的飞书 API
 
+### 认证相关
+
 | API | 方法 | 用途 |
 |-----|------|------|
 | `/open-apis/auth/v3/tenant_access_token/internal` | POST | 获取应用访问凭证 |
 | `/open-apis/auth/v3/app_access_token/internal` | POST | 获取应用凭证（OAuth 流程） |
 | `/open-apis/authen/v1/authorize` | GET | OAuth 用户授权页面 |
 | `/open-apis/authen/v2/oauth/token` | POST | 授权码换令牌 / 刷新令牌 |
+
+### 文件操作
+
+| API | 方法 | 用途 |
+|-----|------|------|
 | `/open-apis/drive/v1/files` | GET | 列出文件夹内容 |
 | `/open-apis/drive/v1/files/create_folder` | POST | 创建文件夹 |
 | `/open-apis/drive/v1/files/{token}` | DELETE | 删除文件 |
-| `/open-apis/drive/v1/medias/upload_all` | POST | 全量上传文件（≤20MB） |
-| `/open-apis/drive/v1/medias/upload_prepare` | POST | 分片预上传 |
-| `/open-apis/drive/v1/medias/upload_block` | POST | 分片上传 |
-| `/open-apis/drive/v1/medias/upload_finish` | POST | 完成分片上传 |
-| `/open-apis/drive/v1/files/{token}/download` | GET | 下载文件 |
-| `/open-apis/drive/v1/export_tasks` | POST | 创建文档导出任务 |
-| `/open-apis/drive/v1/import_tasks` | POST | 创建文档导入任务 |
+| `/open-apis/drive/v1/files/{token}/move` | POST | 移动文件 |
+| `/open-apis/drive/v1/files/upload_all` | POST | 全量上传文件（≤20MB） |
+| `/open-apis/drive/v1/files/upload_prepare` | POST | 分片预上传 |
+| `/open-apis/drive/v1/files/upload_block` | POST | 分片上传 |
+| `/open-apis/drive/v1/files/upload_finish` | POST | 完成分片上传 |
+| `/open-apis/drive/v1/files/{token}/download` | GET | 下载云空间文件 |
+| `/open-apis/drive/v1/medias/upload_all` | POST | 导入上传文件（用于导入流程） |
+| `/open-apis/drive/v1/medias/{token}/download` | GET | 下载云文档素材 |
+| `/open-apis/drive/v1/export_tasks` | POST/GET | 创建/查询文档导出任务 |
+| `/open-apis/drive/v1/import_tasks` | POST/GET | 创建/查询文档导入任务 |
+
+### 租户信息
+
+| API | 方法 | 用途 |
+|-----|------|------|
+| `/open-apis/tenant/v2/tenant/query` | GET | 查询租户信息 |
 
 ---
 
@@ -374,12 +414,17 @@ npm run dev
 
 | 文件 | 说明 |
 |------|------|
-| `main.ts` | 插件主入口 |
-| `settings.ts` | 设置界面 |
+| `main.ts` | 插件主入口，命令注册和协调 |
+| `settings.ts` | 设置界面和配置管理 |
 | `feishuAuth.ts` | 飞书认证模块（tenant_access_token + OAuth user_access_token） |
 | `feishuApi.ts` | 飞书 Drive API 封装（文件上传、下载、删除、文件夹管理等） |
 | `syncEngine.ts` | 同步引擎（增量同步、上传、下载、删除策略） |
 | `fileWatcher.ts` | 本地文件监控（防抖调度） |
+| `syncFolderConfig.ts` | 多文件夹同步配置管理 |
+| `ignoreFilter.ts` | 忽略规则过滤器（.feisyncignore） |
+| `logger.ts` | 统一日志模块 |
+| `feishuFolderBrowser.ts` | 飞书文件夹浏览器组件 |
+| `fileTypeUtils.ts` | 文件类型识别工具 |
 
 ---
 

@@ -9,6 +9,10 @@ import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
 import { FileWatcher } from './fileWatcher';
 import { SyncEngine, FileSyncRecord } from './syncEngine';
+import { SyncFolderConfig, migrateFromLegacyConfig, getEnabledConfigs } from './syncFolderConfig';
+import { createLogger } from './logger';
+
+const log = createLogger('Main');
 
 // 插件主类
 export default class FeiSyncPlugin extends Plugin {
@@ -40,7 +44,7 @@ export default class FeiSyncPlugin extends Plugin {
    * 插件加载时调用
    */
   async onload(): Promise<void> {
-    console.log('[FeiSync] 插件加载中...');
+    log.info('插件加载中...');
 
     // 1. 加载设置
     await this.loadSettings();
@@ -61,9 +65,9 @@ export default class FeiSyncPlugin extends Plugin {
     // 6. 添加状态栏
     this.setupStatusBar();
 
-    // 7. 启动文件监控（如果已启用）
-    if (this.settings.autoSyncOnChange && this.settings.localFolderPath) {
-      this.toggleFileWatcher(true);
+    // 7. 启动文件监控（如果已启用且有同步路径）
+    if (this.settings.autoSyncOnChange && this.hasSyncPaths()) {
+      await this.toggleFileWatcher(true);
     }
 
     // 8. 启动定时同步（如果已启用）
@@ -71,14 +75,14 @@ export default class FeiSyncPlugin extends Plugin {
       this.toggleScheduledSync(true);
     }
 
-    console.log('[FeiSync] 插件加载完成');
+    log.info('插件加载完成');
   }
 
   /**
    * 插件卸载时调用
    */
   async onunload(): Promise<void> {
-    console.log('[FeiSync] 插件卸载中...');
+    log.info('插件卸载中...');
 
     // 停止文件监控
     if (this.fileWatcher) {
@@ -93,7 +97,7 @@ export default class FeiSyncPlugin extends Plugin {
       this.ribbonIconEl.remove();
     }
 
-    console.log('[FeiSync] 插件卸载完成');
+    log.info('插件卸载完成');
   }
 
   /**
@@ -119,6 +123,10 @@ export default class FeiSyncPlugin extends Plugin {
       if (!this.settings.syncRecords || typeof this.settings.syncRecords !== 'object') {
         this.settings.syncRecords = {};
       }
+      // 确保 syncFolders 是数组
+      if (!Array.isArray(this.settings.syncFolders)) {
+        this.settings.syncFolders = [];
+      }
       // 兼容旧版本：如果 data 中有 feisyncSyncRecords 但 settings.syncRecords 为空，迁移数据
       if (loadedData && loadedData.feisyncSyncRecords && Object.keys(this.settings.syncRecords).length === 0) {
         const oldRecords = typeof loadedData.feisyncSyncRecords === 'string'
@@ -128,9 +136,19 @@ export default class FeiSyncPlugin extends Plugin {
           this.settings.syncRecords = oldRecords;
         }
       }
-      console.log('[FeiSync] 设置加载成功');
+      // 兼容旧版本：如果 localFolderPath 存在但 syncFolders 为空，自动迁移
+      if (this.settings.localFolderPath && this.settings.syncFolders.length === 0) {
+        log.info(`检测到旧版单文件夹配置 "${this.settings.localFolderPath}"，自动迁移为多文件夹映射`);
+        this.settings.syncFolders = migrateFromLegacyConfig(
+          this.settings.localFolderPath,
+          this.settings.feishuRootFolderToken
+        );
+        await this.saveData(this.settings);
+        log.info(`旧配置已迁移，生成 ${this.settings.syncFolders.length} 条映射`);
+      }
+      log.info('设置加载成功');
     } catch (error) {
-      console.error('[FeiSync] 加载设置失败:', error);
+      log.error('加载设置失败:', error);
       this.settings = getDefaultSettings();
     }
   }
@@ -141,7 +159,7 @@ export default class FeiSyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     try {
       await this.saveData(this.settings);
-      console.log('[FeiSync] 设置保存成功');
+      log.debug('设置保存成功');
 
       // 如果认证信息变更，更新或创建 authManager
       if (this.settings.appId && this.settings.appSecret) {
@@ -163,12 +181,12 @@ export default class FeiSyncPlugin extends Plugin {
         this.apiClient.updateMaxRetries(this.settings.maxRetryAttempts);
       }
 
-      // 更新文件监控配置
+      // 更新文件监控配置（现在是异步的）
       if (this.fileWatcher) {
-        this.fileWatcher.updateConfig(this.settings.localFolderPath, this.settings.autoSyncOnChange);
+        await this.fileWatcher.updateConfig(this.settings.localFolderPath, this.settings.autoSyncOnChange);
       }
     } catch (error) {
-      console.error('[FeiSync] 保存设置失败:', error);
+      log.error('保存设置失败:', error);
       new Notice('保存设置失败');
     }
   }
@@ -177,26 +195,32 @@ export default class FeiSyncPlugin extends Plugin {
    * 初始化各模块
    */
   private async initializeModules(): Promise<void> {
+    log.debug('初始化模块...');
+
     // 认证管理器
     if (this.settings.appId && this.settings.appSecret) {
         this.authManager = new FeishuAuthManager(
           this.settings.appId, this.settings.appSecret, this.getEffectiveProxyUrl(),
           () => this.saveUserToken()
         );
+        log.debug('认证管理器已初始化');
     }
 
     // API 客户端
     if (this.authManager) {
       this.apiClient = new FeishuApiClient(this.authManager, this.getEffectiveProxyUrl(), this.settings.maxRetryAttempts);
+      log.debug('API 客户端已初始化');
     }
 
     // 同步引擎
     if (this.apiClient) {
       this.syncEngine = new SyncEngine(this, this.apiClient);
+      log.debug('同步引擎已初始化');
     }
 
     // 文件监控器
     this.fileWatcher = new FileWatcher(this);
+    log.debug('文件监控器已初始化');
 
     // 从存储中恢复用户授权信息
     await this.loadUserToken();
@@ -212,10 +236,11 @@ export default class FeiSyncPlugin extends Plugin {
         const tokenInfo = JSON.parse(tokenStr);
         if (tokenInfo) {
           this.authManager?.loadUserTokenFromData(tokenInfo);
+          log.debug('用户令牌已加载');
         }
       }
     } catch (error) {
-      console.error('[FeiSync] 加载用户令牌失败:', error);
+      log.error('加载用户令牌失败:', error);
     }
   }
 
@@ -227,9 +252,9 @@ export default class FeiSyncPlugin extends Plugin {
       try {
         this.settings.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
         await this.saveData(this.settings);
-        console.log('[FeiSync] 用户令牌已保存');
+        log.debug('用户令牌已保存');
       } catch (error) {
-        console.error('[FeiSync] 保存用户令牌失败:', error);
+        log.error('保存用户令牌失败:', error);
       }
     } else {
       // token 已被清除（如 refresh_token 失效），需要从设置中移除旧 token
@@ -237,9 +262,9 @@ export default class FeiSyncPlugin extends Plugin {
         try {
           this.settings.feishuUserToken = '';
           await this.saveData(this.settings);
-          console.log('[FeiSync] 已从存储中移除失效的用户令牌');
+          log.info('已从存储中移除失效的用户令牌');
         } catch (error) {
-          console.error('[FeiSync] 移除用户令牌失败:', error);
+          log.error('移除用户令牌失败:', error);
         }
       }
     }
@@ -253,7 +278,7 @@ export default class FeiSyncPlugin extends Plugin {
       this.settings.syncRecords = {};
     }
     const records = this.settings.syncRecords;
-    console.log(`[FeiSync] 已加载 ${Object.keys(records).length} 条同步记录`);
+    log.debug(`已加载 ${Object.keys(records).length} 条同步记录`);
     return records;
   }
 
@@ -264,9 +289,9 @@ export default class FeiSyncPlugin extends Plugin {
     try {
       this.settings.syncRecords = records;
       await this.saveData(this.settings);
-      console.log(`[FeiSync] 已保存 ${Object.keys(records).length} 条同步记录`);
+      log.debug(`已保存 ${Object.keys(records).length} 条同步记录`);
     } catch (error) {
-      console.error('[FeiSync] 保存同步记录失败:', error);
+      log.error('保存同步记录失败:', error);
     }
   }
 
@@ -412,25 +437,19 @@ export default class FeiSyncPlugin extends Plugin {
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
 
-    if (!this.isConfigured()) {
-      throw new Error('请先配置飞书 App ID 和 App Secret');
-    }
-
-    if (!this.authManager?.isUserAuthorized()) {
-      throw new Error('用户未授权，请先在设置中完成飞书 OAuth 授权');
-    }
-
-    if (!this.settings.localFolderPath) {
-      throw new Error('请先配置本地同步文件夹');
+    const preCheck = this.validateForSync();
+    if (!preCheck.ready) {
+      new Notice(preCheck.message);
+      return;
     }
 
     this.isSyncing = true;
     this.updateStatusBar('同步中...');
 
     try {
-      console.log('[FeiSync] 开始同步...');
+      log.info('开始同步...');
       await this.syncEngine.sync();
-      console.log('[FeiSync] 同步流程结束');
+      log.info('同步流程结束');
       this.updateStatusBar('同步完成');
     } catch (error) {
       this.updateStatusBar('同步失败');
@@ -459,16 +478,10 @@ export default class FeiSyncPlugin extends Plugin {
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
 
-    if (!this.isConfigured()) {
-      throw new Error('请先配置飞书 App ID 和 App Secret');
-    }
-
-    if (!this.authManager?.isUserAuthorized()) {
-      throw new Error('用户未授权，请先在设置中完成飞书 OAuth 授权');
-    }
-
-    if (!this.settings.localFolderPath) {
-      throw new Error('请先配置本地同步文件夹');
+    const preCheck = this.validateForSync();
+    if (!preCheck.ready) {
+      new Notice(preCheck.message);
+      return;
     }
 
     this.isSyncing = true;
@@ -498,16 +511,41 @@ export default class FeiSyncPlugin extends Plugin {
   }
 
   /**
+   * 检查是否有可同步的路径（新版 syncFolders 或旧版 localFolderPath）
+   */
+  hasSyncPaths(): boolean {
+    const enabledConfigs = getEnabledConfigs(this.settings.syncFolders || []);
+    return enabledConfigs.length > 0 || !!this.settings.localFolderPath;
+  }
+
+  /**
+   * 同步前置检查，返回 { ready, message }
+   * 合并 isConfigured + hasSyncPaths + isUserAuthorized 检查，一次性告知用户所有问题
+   */
+  private validateForSync(): { ready: boolean; message: string } {
+    if (!this.isConfigured()) {
+      return { ready: false, message: '请先配置飞书 App ID 和 App Secret' };
+    }
+    if (!this.authManager?.isUserAuthorized()) {
+      return { ready: false, message: '用户未授权，请先在设置中完成飞书 OAuth 授权' };
+    }
+    if (!this.hasSyncPaths()) {
+      return { ready: false, message: '请先配置同步文件夹映射（或在旧版设置中指定本地同步文件夹）' };
+    }
+    return { ready: true, message: '' };
+  }
+
+  /**
    * 切换文件监控器
    */
-  toggleFileWatcher(enable: boolean): void {
+  async toggleFileWatcher(enable: boolean): Promise<void> {
     if (!this.fileWatcher) {
-      console.warn('[FeiSync] 文件监控器未初始化');
+      log.warn('文件监控器未初始化');
       return;
     }
 
     if (enable) {
-      this.fileWatcher.updateConfig(this.settings.localFolderPath, true);
+      await this.fileWatcher.updateConfig(this.settings.localFolderPath, true);
     } else {
       this.fileWatcher.stop();
     }
@@ -525,18 +563,18 @@ export default class FeiSyncPlugin extends Plugin {
 
     if (enable && this.settings.scheduledSyncInterval > 0) {
       const intervalMs = this.settings.scheduledSyncInterval * 60 * 1000;
-      console.log(`[FeiSync] 启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
+      log.info(`启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
 
       this.scheduledSyncTimer = setInterval(async () => {
         try {
-          console.log('[FeiSync] 定时同步触发');
+          log.info('定时同步触发');
           await this.sync();
         } catch (error) {
-          console.error('[FeiSync] 定时同步失败:', error);
+          log.error('定时同步失败:', error);
         }
       }, intervalMs);
     } else {
-      console.log('[FeiSync] 定时同步已停止');
+      log.info('定时同步已停止');
     }
   }
 }

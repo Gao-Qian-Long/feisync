@@ -8,148 +8,47 @@
 
 Obsidian 提供了 `Vault` 事件，可通过 `this.app.vault.on(event, callback)` 监听：
 
-| 事件 | 说明 |
-|------|------|
-| `create` | 文件或文件夹创建 |
-| `modify` | 文件内容修改 |
-| `delete` | 文件或文件夹删除 |
-| `rename` | 文件或文件夹重命名 |
+| 事件 | 说明 | 处理 |
+|------|------|------|
+| `create` | 文件或文件夹创建 | 忽略文件夹，触发同步 |
+| `modify` | 文件内容修改 | 触发同步 |
+| `delete` | 文件或文件夹删除 | 同步删除云端文件（可选） |
+| `rename` | 文件或文件夹重命名 | 删除旧云端文件 |
 
-## 实现
+## 忽略规则集成
 
-### FileWatcher 类
+FileWatcher 使用 IgnoreFilter 检查文件是否应该被忽略：
 
 ```typescript
-export class FileWatcher {
-  private plugin: FeiSyncPlugin;
-  private watchedPath: string = '';  // 监控的本地文件夹路径
-  private isEnabled: boolean = false;
-  private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private vault: Vault;
+private shouldIgnore(file: TAbstractFile): boolean {
+  // .feisyncignore 文件本身不被忽略
+  if (file.name === FEISYNC_IGNORE_FILE) {
+    return false;
+  }
+  
+  // 检查忽略规则
+  return this.ignoreFilter.shouldIgnore(file.path);
+}
+```
 
-  // 事件处理函数绑定
-  private handleCreate = this.onFileCreate.bind(this);
-  private handleModify = this.onFileModify.bind(this);
-  private handleDelete = this.onFileDelete.bind(this);
-  private handleRename = this.onFileRename.bind(this);
+## 多文件夹监控
 
-  constructor(plugin: FeiSyncPlugin) {
-    this.plugin = plugin;
-    this.vault = plugin.app.vault;
+支持同时监控多个配置的文件夹：
+
+```typescript
+private isInWatchedPath(file: TAbstractFile): boolean {
+  if (this.watchedPaths.length === 0) {
+    return false;
   }
 
-  /**
-   * 更新监控配置
-   */
-  updateConfig(watchedPath: string, enabled: boolean): void {
-    this.stop();
-    this.watchedPath = watchedPath;
-    this.isEnabled = enabled;
-    if (this.isEnabled && this.watchedPath) {
-      this.start();
+  const relativePath = file.path.replace(/\\/g, '/');
+  return this.watchedPaths.some(watchedPath => {
+    const normalizedWatchedPath = watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
+    if (relativePath === normalizedWatchedPath) {
+      return true;
     }
-  }
-
-  /**
-   * 启动文件监控
-   */
-  private start(): void {
-    this.vault.on('create', this.handleCreate);
-    this.vault.on('modify', this.handleModify);
-    this.vault.on('delete', this.handleDelete);
-    this.vault.on('rename', this.handleRename);
-  }
-
-  /**
-   * 停止文件监控
-   */
-  stop(): void {
-    this.vault.off('create', this.handleCreate);
-    this.vault.off('modify', this.handleModify);
-    this.vault.off('delete', this.handleDelete);
-    this.vault.off('rename', this.handleRename);
-    
-    // 清理防抖定时器
-    this.debounceTimers.forEach(timer => clearTimeout(timer));
-    this.debounceTimers.clear();
-  }
-
-  /**
-   * 检查文件是否在监控路径内
-   */
-  private isInWatchedPath(file: TAbstractFile): boolean {
-    if (!this.watchedPath) return false;
-    
-    const normalizedPath = file.path.replace(/\\/g, '/');
-    const normalizedWatched = this.watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
-    
-    return normalizedPath === normalizedWatched || 
-           normalizedPath.startsWith(normalizedWatched + '/');
-  }
-
-  /**
-   * 文件创建事件
-   */
-  private onFileCreate(file: TAbstractFile): void {
-    if (!this.isInWatchedPath(file)) return;
-    if (file instanceof TFolder) return;  // 忽略文件夹
-    this.scheduleSync('create', file.path);
-  }
-
-  /**
-   * 文件修改事件
-   */
-  private onFileModify(file: TAbstractFile): void {
-    if (!this.isInWatchedPath(file)) return;
-    if (file instanceof TFolder) return;
-    this.scheduleSync('modify', file.path);
-  }
-
-  /**
-   * 文件删除事件
-   */
-  private onFileDelete(file: TAbstractFile): void {
-    if (!this.isInWatchedPath(file)) return;
-    this.scheduleSync('delete', file.path);
-  }
-
-  /**
-   * 文件重命名事件
-   */
-  private onFileRename(file: TAbstractFile, oldPath: string): void {
-    if (this.isInWatchedPath(file)) {
-      this.scheduleSync('rename', oldPath, file.path);
-    }
-  }
-
-  /**
-   * 防抖调度同步
-   */
-  private scheduleSync(action: string, ...paths: string[]): void {
-    const key = paths.join('|');
-    
-    if (this.debounceTimers.has(key)) {
-      clearTimeout(this.debounceTimers.get(key)!);
-    }
-    
-    const delayMs = this.plugin.settings.syncInterval * 60 * 1000;
-    
-    const timer = setTimeout(async () => {
-      this.debounceTimers.delete(key);
-      await this.plugin.sync();
-    }, delayMs);
-    
-    this.debounceTimers.set(key, timer);
-  }
-
-  /**
-   * 立即触发同步
-   */
-  async triggerImmediateSync(): Promise<void> {
-    this.debounceTimers.forEach(timer => clearTimeout(timer));
-    this.debounceTimers.clear();
-    await this.plugin.sync();
-  }
+    return relativePath.startsWith(normalizedWatchedPath + '/');
+  });
 }
 ```
 
@@ -161,6 +60,46 @@ export class FileWatcher {
 - **按路径防抖**：同一文件的多次变化只触发一次同步
 - **自动取消**：新变化会取消旧的待处理同步
 
+```typescript
+private scheduleSync(action: string, ...paths: string[]): void {
+  const key = paths.join('|');
+  
+  // 取消旧的定时器
+  if (this.debounceTimers.has(key)) {
+    clearTimeout(this.debounceTimers.get(key)!);
+  }
+  
+  const delayMs = this.plugin.settings.syncInterval * 60 * 1000;
+  
+  const timer = setTimeout(async () => {
+    this.debounceTimers.delete(key);
+    await this.plugin.sync();
+  }, delayMs);
+  
+  this.debounceTimers.set(key, timer);
+}
+```
+
+## 重命名事件处理
+
+重命名事件需要同时处理旧路径和新路径：
+
+```typescript
+private onFileRename(file: TAbstractFile, oldPath: string): void {
+  // 新路径在监控范围内
+  if (this.isInWatchedPath(file)) {
+    // 触发同步（会上传到新位置）
+    this.scheduleSync('rename', file.path);
+  }
+  
+  // 旧路径在监控范围内
+  if (this.wasInWatchedPath(oldPath)) {
+    // 触发删除旧云端文件
+    this.handleRename(oldPath, file.path);
+  }
+}
+```
+
 ## 与插件集成
 
 ```typescript
@@ -170,8 +109,9 @@ async onload(): Promise<void> {
   this.fileWatcher = new FileWatcher(this);
   
   // 如果设置了自动同步，则启动监控
-  if (this.settings.autoSyncOnChange && this.settings.localFolderPath) {
-    this.fileWatcher.updateConfig(this.settings.localFolderPath, true);
+  const enabledConfigs = getEnabledConfigs(this.settings.syncFolders || []);
+  if (this.settings.autoSyncOnChange && enabledConfigs.length > 0) {
+    await this.fileWatcher.updateConfig('', true);
   }
 }
 
@@ -181,17 +121,45 @@ async onunload(): Promise<void> {
 }
 
 // 设置变更时更新监控配置
-toggleFileWatcher(enable: boolean): void {
-  if (enable) {
-    this.fileWatcher?.updateConfig(this.settings.localFolderPath, true);
-  } else {
-    this.fileWatcher?.stop();
-  }
+async updateWatchedFolders(): Promise<void> {
+  await this.fileWatcher.updateConfig('', this.settings.autoSyncOnChange);
 }
+```
+
+## 事件处理流程
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Vault 事件触发                            │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 检查文件是否在监控路径内                                      │
+│  - 路径标准化（反斜杠转正斜杠）                              │
+│  - 支持多文件夹监控                                          │
+└─────────────────────────────────────────────────────────────┘
+                            │
+              ┌─────────────┴─────────────┐
+              │ 在监控路径内                 │ 不在监控路径内
+              ▼                             ▼
+┌───────────────────────────┐   ┌───────────────────────────┐
+│ 检查文件是否应被忽略        │   │ 忽略，不触发同步           │
+│ - .feisyncignore 规则     │   └───────────────────────────┘
+│ - 特定文件（如 .DS_Store）│
+└───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 调度同步（防抖）                                              │
+│ - 按路径作为 key                                             │
+│ - 新事件取消旧事件                                           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## 注意事项
 
-1. **文件夹创建/删除**：目前忽略文件夹事件，仅同步文件。
-2. **同步范围**：仅监控 `localFolderPath` 配置的文件夹及其子文件夹。
+1. **文件夹事件**：文件夹创建/删除事件目前被忽略，仅同步文件。
+2. **同步范围**：仅监控配置中启用的文件夹及其子文件夹。
 3. **性能考虑**：防抖机制避免频繁同步。
+4. **定时同步**：与 FileWatcher 独立的定时同步机制，不受防抖影响。

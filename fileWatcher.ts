@@ -2,17 +2,24 @@
  * 本地文件监控模块
  * 负责监听 Obsidian 仓库中的文件变化，并触发同步
  * 支持精确的删除和重命名处理
+ * 支持多文件夹监控和忽略规则过滤
  */
 
 import { Vault, TAbstractFile, TFolder, TFile } from 'obsidian';
 import FeiSyncPlugin from './main';
+import { loadIgnoreFilter, IgnoreFilter, FEISYNC_IGNORE_FILE } from './ignoreFilter';
+import { getEnabledConfigs, SyncFolderConfig } from './syncFolderConfig';
+import { createLogger } from './logger';
+
+const log = createLogger('FileWatcher');
 
 export class FileWatcher {
   private plugin: FeiSyncPlugin;
-  private watchedPath: string = ''; // 配置的本地文件夹路径（相对仓库根目录）
+  private watchedPaths: string[] = []; // 监控的本地文件夹路径列表
   private isEnabled: boolean = false;
   private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private vault: Vault;
+  private ignoreFilter: IgnoreFilter = new IgnoreFilter();
 
   // 事件处理函数绑定（保存引用以便移除）
   private handleCreate = this.onFileCreate.bind(this);
@@ -27,12 +34,26 @@ export class FileWatcher {
 
   /**
    * 更新监控配置
+   * 支持多文件夹路径
    */
-  updateConfig(watchedPath: string, enabled: boolean): void {
+  async updateConfig(watchedPath: string, enabled: boolean): Promise<void> {
     this.stop();
-    this.watchedPath = watchedPath;
+    this.watchedPaths = [];
+
+    // 支持多文件夹映射
+    const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+    if (enabledConfigs.length > 0) {
+      this.watchedPaths = enabledConfigs.map(c => c.localPath);
+      log.info(`监控 ${this.watchedPaths.length} 个文件夹: ${this.watchedPaths.join(', ')}`);
+    } else if (watchedPath) {
+      // 旧版兼容
+      this.watchedPaths = [watchedPath];
+    }
+
     this.isEnabled = enabled;
-    if (this.isEnabled && this.watchedPath) {
+    if (this.isEnabled && this.watchedPaths.length > 0) {
+      // 加载忽略过滤器
+      this.ignoreFilter = await loadIgnoreFilter(this.vault);
       this.start();
     }
   }
@@ -41,7 +62,7 @@ export class FileWatcher {
    * 启动文件监控
    */
   private start(): void {
-    console.log('[FeiSync] 启动文件监控，监控路径:', this.watchedPath);
+    log.info(`启动文件监控，监控路径: ${this.watchedPaths.join(', ')}`);
 
     this.vault.on('create', this.handleCreate as (...args: unknown[]) => unknown);
     this.vault.on('modify', this.handleModify as (...args: unknown[]) => unknown);
@@ -53,7 +74,7 @@ export class FileWatcher {
    * 停止文件监控
    */
   stop(): void {
-    console.log('[FeiSync] 停止文件监控');
+    log.info('停止文件监控');
 
     this.vault.off('create', this.handleCreate as (...args: unknown[]) => unknown);
     this.vault.off('modify', this.handleModify as (...args: unknown[]) => unknown);
@@ -67,39 +88,58 @@ export class FileWatcher {
 
   /**
    * 检查文件是否在监控路径内
+   * 支持多文件夹监控
    */
   private isInWatchedPath(file: TAbstractFile): boolean {
-    if (!this.watchedPath) {
+    if (this.watchedPaths.length === 0) {
       return false;
     }
 
-    const relativePath = file.path;
-    const normalizedWatchedPath = this.watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
-    const normalizedRelativePath = relativePath.replace(/\\/g, '/');
-
-    if (normalizedRelativePath === normalizedWatchedPath) {
-      return true;
-    }
-
-    return normalizedRelativePath.startsWith(normalizedWatchedPath + '/');
+    const relativePath = file.path.replace(/\\/g, '/');
+    return this.watchedPaths.some(watchedPath => {
+      const normalizedWatchedPath = watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
+      if (relativePath === normalizedWatchedPath) {
+        return true;
+      }
+      return relativePath.startsWith(normalizedWatchedPath + '/');
+    });
   }
 
   /**
    * 检查旧路径是否在监控路径内（用于 rename 事件）
    */
   private wasInWatchedPath(oldPath: string): boolean {
-    if (!this.watchedPath) {
+    if (this.watchedPaths.length === 0) {
       return false;
     }
 
-    const normalizedWatchedPath = this.watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
     const normalizedOldPath = oldPath.replace(/\\/g, '/');
+    return this.watchedPaths.some(watchedPath => {
+      const normalizedWatchedPath = watchedPath.replace(/\\/g, '/').replace(/\/$/, '');
+      if (normalizedOldPath === normalizedWatchedPath) {
+        return true;
+      }
+      return normalizedOldPath.startsWith(normalizedWatchedPath + '/');
+    });
+  }
 
-    if (normalizedOldPath === normalizedWatchedPath) {
-      return true;
+  /**
+   * 检查文件是否应被忽略
+   */
+  private shouldIgnore(file: TAbstractFile): boolean {
+    // .feisyncignore 文件本身不被忽略
+    if (file.name === FEISYNC_IGNORE_FILE) {
+      return false;
     }
 
-    return normalizedOldPath.startsWith(normalizedWatchedPath + '/');
+    if (this.ignoreFilter.hasRules) {
+      const isDir = file instanceof TFolder;
+      if (this.ignoreFilter.shouldIgnore(file.path, isDir)) {
+        log.debug(`忽略文件变更: ${file.path}`);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -110,12 +150,25 @@ export class FileWatcher {
       return;
     }
 
-    if (file instanceof TFolder) {
-      console.log('[FeiSync] 忽略文件夹创建事件:', file.path);
+    if (this.shouldIgnore(file)) {
       return;
     }
 
-    console.log('[FeiSync] 检测到新文件:', file.path);
+    if (file instanceof TFolder) {
+      log.debug('忽略文件夹创建事件:', file.path);
+      return;
+    }
+
+    // .feisyncignore 文件变更时，重新加载忽略规则
+    if (file.name === FEISYNC_IGNORE_FILE) {
+      log.info('.feisyncignore 文件已创建，重新加载忽略规则');
+      loadIgnoreFilter(this.vault).then(filter => {
+        this.ignoreFilter = filter;
+      });
+      return;
+    }
+
+    log.info('检测到新文件:', file.path);
     this.scheduleSync('create', file.path);
   }
 
@@ -127,101 +180,126 @@ export class FileWatcher {
       return;
     }
 
+    if (this.shouldIgnore(file)) {
+      return;
+    }
+
     if (file instanceof TFolder) {
       return;
     }
 
-    console.log('[FeiSync] 检测到文件修改:', file.path);
+    // .feisyncignore 文件变更时，重新加载忽略规则
+    if (file.name === FEISYNC_IGNORE_FILE) {
+      log.info('.feisyncignore 文件已修改，重新加载忽略规则');
+      loadIgnoreFilter(this.vault).then(filter => {
+        this.ignoreFilter = filter;
+      });
+      return;
+    }
+
+    log.info('检测到文件修改:', file.path);
     this.scheduleSync('modify', file.path);
   }
 
   /**
    * 文件删除事件处理
-   * 直接调用 syncEngine.handleDelete 删除云端文件
    */
   private onFileDelete(file: TAbstractFile): void {
     if (!this.wasInWatchedPath(file.path)) {
       return;
     }
 
-    if (file instanceof TFolder) {
-      console.log('[FeiSync] 忽略文件夹删除事件:', file.path);
+    // 删除事件不检查忽略规则（可能之前忽略的文件被删除了，但同步记录中可能没有）
+    // 但 .feisyncignore 文件删除时，需要重新加载忽略规则
+    if (file.path === FEISYNC_IGNORE_FILE || file.path.endsWith('/' + FEISYNC_IGNORE_FILE)) {
+      log.info('.feisyncignore 文件已删除，清除忽略规则');
+      this.ignoreFilter = new IgnoreFilter();
       return;
     }
 
-    console.log('[FeiSync] 检测到文件删除:', file.path);
+    if (file instanceof TFolder) {
+      log.debug('忽略文件夹删除事件:', file.path);
+      return;
+    }
+
+    log.info('检测到文件删除:', file.path);
 
     // 删除事件不需要防抖，直接处理
     if (this.plugin.syncEngine) {
       this.plugin.syncEngine.handleDelete(file.path).catch(error => {
-        console.error('[FeiSync] 处理文件删除失败:', error);
+        log.error('处理文件删除失败:', error);
       });
     }
   }
 
   /**
    * 文件重命名事件处理
-   * 使用 syncEngine.handleRename 精确处理：删除旧云端文件，新文件等待下次同步
    */
   private onFileRename(file: TAbstractFile, oldPath: string): void {
     const oldInWatched = this.wasInWatchedPath(oldPath);
     const newInWatched = this.isInWatchedPath(file);
 
     if (file instanceof TFolder) {
-      console.log('[FeiSync] 忽略文件夹重命名事件:', oldPath, '->', file.path);
+      log.debug('忽略文件夹重命名事件:', oldPath, '->', file.path);
       return;
     }
 
     if (oldInWatched && newInWatched) {
-      // 在监控范围内重命名：删除旧云端文件，新文件等待同步上传
-      console.log('[FeiSync] 检测到文件重命名:', oldPath, '->', file.path);
+      // 检查新路径是否应被忽略
+      if (this.shouldIgnore(file)) {
+        // 文件被重命名到忽略的路径，删除旧的云端文件
+        log.info(`文件重命名到忽略路径，删除旧云端文件: ${oldPath} -> ${file.path}`);
+        if (this.plugin.syncEngine) {
+          this.plugin.syncEngine.handleDelete(oldPath).catch(error => {
+            log.error('处理文件移出失败:', error);
+          });
+        }
+        return;
+      }
+
+      log.info('检测到文件重命名:', oldPath, '->', file.path);
       if (this.plugin.syncEngine) {
         this.plugin.syncEngine.handleRename(oldPath, file.path).then(() => {
-          // 重命名处理完成后，触发一次同步以上传新路径的文件
           this.scheduleSync('rename', file.path);
         }).catch(error => {
-          console.error('[FeiSync] 处理文件重命名失败:', error);
+          log.error('处理文件重命名失败:', error);
         });
       }
     } else if (oldInWatched && !newInWatched) {
-      // 从监控范围内移出：删除云端文件
-      console.log('[FeiSync] 文件移出监控范围:', oldPath, '->', file.path);
+      log.info('文件移出监控范围:', oldPath, '->', file.path);
       if (this.plugin.syncEngine) {
         this.plugin.syncEngine.handleDelete(oldPath).catch(error => {
-          console.error('[FeiSync] 处理文件移出失败:', error);
+          log.error('处理文件移出失败:', error);
         });
       }
     } else if (!oldInWatched && newInWatched) {
-      // 移入监控范围：视为新文件
-      console.log('[FeiSync] 文件移入监控范围:', oldPath, '->', file.path);
-      this.scheduleSync('rename', file.path);
+      if (!this.shouldIgnore(file)) {
+        log.info('文件移入监控范围:', oldPath, '->', file.path);
+        this.scheduleSync('rename', file.path);
+      }
     }
-    // 两者都不在监控范围，忽略
   }
 
   /**
    * 防抖调度同步
-   * 避免短时间内多次变化导致重复上传
    */
   private scheduleSync(action: string, ...paths: string[]): void {
     const key = paths.join('|');
 
-    // 如果已有定时器，取消旧的
     if (this.debounceTimers.has(key)) {
       clearTimeout(this.debounceTimers.get(key)!);
     }
 
-    // 防抖延迟：5秒（不再使用 syncInterval 作为防抖时间）
     const delayMs = 5000;
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(key);
-      console.log('[FeiSync] 防抖结束，触发同步（操作:', action, '路径:', paths.join(' -> '), ')');
+      log.debug(`防抖结束，触发同步（操作: ${action}, 路径: ${paths.join(' -> ')}）`);
 
       try {
         await this.plugin.sync();
       } catch (error) {
-        console.error('[FeiSync] 自动同步失败:', error);
+        log.error('自动同步失败:', error);
       }
     }, delayMs);
 
@@ -229,7 +307,7 @@ export class FileWatcher {
   }
 
   /**
-   * 立即触发同步（取消所有待处理的同步）
+   * 立即触发同步
    */
   async triggerImmediateSync(): Promise<void> {
     this.debounceTimers.forEach(timer => clearTimeout(timer));

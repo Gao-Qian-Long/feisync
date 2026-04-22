@@ -3,13 +3,21 @@
  * 负责协调文件扫描、上传、下载、删除和飞书Drive操作
  * 支持增量同步：基于文件内容哈希跳过未修改文件
  * 支持并发上传、删除同步、从飞书下载
+ * 支持多文件夹映射同步、.feisyncignore 过滤
  */
 
 import { Vault, TFile, TFolder } from 'obsidian';
 import FeiSyncPlugin from './main';
+import { FeishuFileMeta } from './feishuApi';
 import { FeishuApiClient } from './feishuApi';
 import { Notice, ProgressBarComponent } from 'obsidian';
 import { SyncLogEntry } from './settings';
+import { IgnoreFilter, loadIgnoreFilter, FEISYNC_IGNORE_FILE } from './ignoreFilter';
+import { SyncFolderConfig, getEnabledConfigs, createSyncFolderConfig, validateSyncFolderConfig } from './syncFolderConfig';
+import { isBinaryFile, isTextFile } from './fileTypeUtils';
+import { createLogger } from './logger';
+
+const log = createLogger('SyncEngine');
 
 export interface SyncResult {
   success: boolean;
@@ -33,6 +41,8 @@ export interface FileSyncRecord {
   cloudType: string;
   /** 云端父文件夹 token */
   parentFolderToken: string;
+  /** 所属映射的 ID（多文件夹同步时用于区分） */
+  folderConfigId?: string;
 }
 
 /**
@@ -97,6 +107,7 @@ export class SyncEngine {
   private plugin: FeiSyncPlugin;
   private apiClient: FeishuApiClient;
   private vault: Vault;
+  private ignoreFilter: IgnoreFilter = new IgnoreFilter();
 
   constructor(plugin: FeiSyncPlugin, apiClient: FeishuApiClient) {
     this.plugin = plugin;
@@ -122,7 +133,16 @@ export class SyncEngine {
   }
 
   /**
+   * 加载忽略过滤器
+   */
+  async reloadIgnoreFilter(): Promise<void> {
+    this.ignoreFilter = await loadIgnoreFilter(this.vault);
+    log.info(`忽略过滤器已加载，${this.ignoreFilter.ruleCount} 条规则`);
+  }
+
+  /**
    * 执行一次完整同步（增量 + 删除）
+   * 支持多文件夹映射同步
    */
   async sync(): Promise<SyncResult> {
     const result: SyncResult = {
@@ -135,6 +155,71 @@ export class SyncEngine {
       errors: [],
     };
 
+    // 1. 加载忽略过滤器
+    await this.reloadIgnoreFilter();
+
+    // 2. 获取已启用的文件夹映射
+    const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+
+    // 兼容旧配置：如果没有 syncFolders 但有 localFolderPath，使用旧逻辑
+    if (enabledConfigs.length === 0 && this.plugin.settings.localFolderPath) {
+      log.info('使用旧版单文件夹同步模式');
+      return this.syncLegacy(result);
+    }
+
+    if (enabledConfigs.length === 0) {
+      result.success = false;
+      result.errors.push('未配置同步文件夹映射');
+      new Notice('同步失败：未配置同步文件夹映射');
+      return result;
+    }
+
+    log.info(`开始多文件夹同步，共 ${enabledConfigs.length} 个映射`);
+
+    // 3. 遍历每个映射执行同步
+    for (const folderConfig of enabledConfigs) {
+      log.info(`--- 同步映射: "${folderConfig.localPath}" → remote="${folderConfig.remoteFolderToken || '(auto)'}" ---`);
+
+      try {
+        const folderResult = await this.syncFolder(folderConfig);
+        // 合并结果
+        result.uploadedCount += folderResult.uploadedCount;
+        result.skippedCount += folderResult.skippedCount;
+        result.failedCount += folderResult.failedCount;
+        result.deletedCount += folderResult.deletedCount;
+        result.errors.push(...folderResult.errors);
+      } catch (error) {
+        const errMsg = (error as Error).message || '';
+        result.errors.push(`映射 "${folderConfig.localPath}" 同步失败: ${errMsg}`);
+        log.error(`映射 "${folderConfig.localPath}" 同步失败:`, error);
+      }
+    }
+
+    // 4. 汇总结果
+    result.success = result.failedCount === 0;
+
+    if (result.failedCount === 0) {
+      const parts: string[] = [];
+      if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
+      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
+      if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
+      if (parts.length === 0) parts.push('无变化');
+      const msg = `同步完成！${parts.join('，')}`;
+      new Notice(msg);
+      this.addLog('info', '', msg);
+    } else {
+      const msg = `同步完成：上传 ${result.uploadedCount}，跳过 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
+      new Notice(msg);
+      this.addLog('info', '', msg);
+    }
+
+    return result;
+  }
+
+  /**
+   * 旧版单文件夹同步（向后兼容）
+   */
+  private async syncLegacy(result: SyncResult): Promise<SyncResult> {
     const { localFolderPath, feishuRootFolderToken, syncOnDelete } = this.plugin.settings;
 
     // 1. 验证配置
@@ -151,8 +236,9 @@ export class SyncEngine {
       targetFolderToken = await this.ensureDefaultFolder();
     }
 
-    // 3. 扫描本地文件夹
+    // 3. 扫描本地文件夹（应用过滤）
     const localFiles = this.scanLocalFolder(localFolderPath);
+    log.info(`扫描到 ${localFiles.length} 个文件（已应用忽略规则）`);
 
     // 4. 加载同步记录
     const syncRecords = await this.plugin.loadSyncRecords();
@@ -160,45 +246,9 @@ export class SyncEngine {
     // 5. 构建本地文件路径集合（用于检测删除）
     const localFilePaths = new Set(localFiles.map(f => f.path));
 
-    // 6. 处理删除：检查同步记录中有但本地已不存在的文件
+    // 6. 处理删除
     if (syncOnDelete) {
-      const recordsToDelete: string[] = [];
-      for (const [filePath, record] of Object.entries(syncRecords)) {
-        // 只处理在监控文件夹下的记录
-        if (!filePath.startsWith(localFolderPath + '/') && filePath !== localFolderPath) {
-          continue;
-        }
-        if (!localFilePaths.has(filePath)) {
-          try {
-            console.log(`[FeiSync] 本地文件已删除，同步删除云端: ${filePath}`);
-            await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
-            recordsToDelete.push(filePath);
-            result.deletedCount++;
-            this.addLog('delete', filePath, `云端文件已删除 (token: ${record.cloudToken})`);
-          } catch (error) {
-            const errMsg = (error as Error).message || '';
-            if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-              // IP 白名单限制，给出明确提示
-              const ipMsg = `删除云端文件 ${filePath} 失败：飞书应用 IP 白名单限制，请在开放平台关闭 IP 限制或添加当前 IP`;
-              result.errors.push(ipMsg);
-              this.addLog('error', filePath, ipMsg);
-              console.warn('[FeiSync]', ipMsg);
-              new Notice('飞书应用 IP 白名单限制，无法删除云端文件。请在飞书开放平台关闭 IP 限制', 8000);
-              // 仍然从记录中移除，避免反复尝试
-              recordsToDelete.push(filePath);
-            } else {
-              const msg = `删除云端文件 ${filePath} 失败: ${errMsg}`;
-              result.errors.push(msg);
-              this.addLog('error', filePath, msg);
-              console.warn('[FeiSync]', msg);
-            }
-          }
-        }
-      }
-      // 从同步记录中移除已删除的文件
-      for (const key of recordsToDelete) {
-        delete syncRecords[key];
-      }
+      await this.handleDeletedFiles(syncRecords, localFilePaths, localFolderPath, result);
     }
 
     // 7. 并发上传文件
@@ -212,15 +262,213 @@ export class SyncEngine {
     new Notice(`开始同步 ${localFiles.length} 个文件...`);
     this.addLog('info', '', `开始同步 ${localFiles.length} 个文件`);
 
+    // 预先获取云端文件列表（用于新文件查重）
+    let cloudFiles: FeishuFileMeta[] | undefined;
+    if (localFiles.length > 0) {
+      try {
+        cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+        log.debug(`预获取云端文件列表完成，共 ${cloudFiles.length} 个文件/文件夹`);
+      } catch (error) {
+        log.warn('预获取云端文件列表失败，将使用逐文件查重:', error);
+        cloudFiles = undefined;
+      }
+    }
+
+    await this.uploadFiles(localFiles, localFolderPath, targetFolderToken, syncRecords, result, undefined, cloudFiles);
+
+    // 8. 保存同步记录
+    await this.plugin.saveSyncRecords(syncRecords);
+
+    // 9. 汇总结果
+    result.success = result.failedCount === 0;
+    this.reportResult(result);
+
+    return result;
+  }
+
+  /**
+   * 同步单个文件夹映射
+   */
+  private async syncFolder(folderConfig: SyncFolderConfig): Promise<SyncResult> {
+    const result: SyncResult = {
+      success: true,
+      uploadedCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      deletedCount: 0,
+      downloadedCount: 0,
+      errors: [],
+    };
+
+    const { syncOnDelete } = this.plugin.settings;
+
+    // 1. 获取飞书目标文件夹
+    let targetFolderToken: string;
+    if (folderConfig.mode === 'custom' && folderConfig.remoteFolderToken) {
+      targetFolderToken = folderConfig.remoteFolderToken;
+      log.debug(`使用自定义 token: ${targetFolderToken.substring(0, 12)}...`);
+    } else {
+      // 自动模式：在统一根目录下创建同名文件夹
+      targetFolderToken = await this.ensureFolderForMapping(folderConfig);
+    }
+
+    // 2. 扫描本地文件夹（应用过滤）
+    const localFiles = this.scanLocalFolder(folderConfig.localPath);
+    log.info(`映射 "${folderConfig.localPath}": 扫描到 ${localFiles.length} 个文件`);
+
+    // 3. 加载同步记录
+    const syncRecords = await this.plugin.loadSyncRecords();
+
+    // 4. 构建本地文件路径集合（用于检测删除）
+    const localFilePaths = new Set(localFiles.map(f => f.path));
+
+    // 5. 处理删除（只处理属于此映射的记录）
+    if (syncOnDelete) {
+      await this.handleDeletedFiles(syncRecords, localFilePaths, folderConfig.localPath, result, folderConfig.id);
+    }
+
+    // 6. 预先获取云端文件列表（用于新文件查重，避免每个文件单独调用 API）
+    let cloudFiles: FeishuFileMeta[] | undefined;
+    let ipDeniedError: boolean = false;
+    if (localFiles.length > 0) {
+      try {
+        cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+        log.debug(`预获取云端文件列表完成，共 ${cloudFiles.length} 个文件/文件夹`);
+      } catch (error) {
+        const errMsg = (error as Error).message || '';
+        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+          ipDeniedError = true;
+          log.warn('飞书应用 IP 白名单限制，预获取云端文件列表失败');
+          new Notice('飞书应用 IP 白名单限制，部分功能可能受限', 10000);
+        } else {
+          log.warn('预获取云端文件列表失败，将使用逐文件查重:', error);
+        }
+        cloudFiles = undefined;
+      }
+    }
+
+    // 如果是 IP 白名单错误，记录到结果中
+    if (ipDeniedError) {
+      result.errors.push('飞书应用 IP 白名单限制，无法执行完整同步');
+      this.addLog('warn', '', 'IP 白名单限制警告');
+    }
+
+    // 7. 并发上传文件
+    if (localFiles.length === 0 && result.deletedCount === 0) {
+      this.addLog('info', '', `映射 "${folderConfig.localPath}": 没有需要同步的文件`);
+      return result;
+    }
+
+    new Notice(`同步 "${folderConfig.localPath}": ${localFiles.length} 个文件...`);
+
+    await this.uploadFiles(localFiles, folderConfig.localPath, targetFolderToken, syncRecords, result, folderConfig.id, cloudFiles);
+
+    // 7. 更新映射的上次同步时间
+    folderConfig.lastSyncTime = Date.now();
+    folderConfig.lastSyncFileCount = localFiles.length;
+
+    // 8. 保存同步记录
+    await this.plugin.saveSyncRecords(syncRecords);
+
+    return result;
+  }
+
+  /**
+   * 确保映射对应的飞书文件夹存在
+   * 自动模式：在统一根目录下创建同名文件夹
+   */
+  private async ensureFolderForMapping(folderConfig: SyncFolderConfig): Promise<string> {
+    // 获取统一根目录
+    let rootToken = this.plugin.settings.feishuRootFolderToken;
+    if (!rootToken) {
+      rootToken = await this.ensureDefaultFolder();
+    }
+
+    // 在根目录下查找或创建同名文件夹
+    const folderName = folderConfig.localPath.split('/').pop() || folderConfig.localPath;
+    const existing = await this.apiClient.findFolderByName(folderName, rootToken);
+    if (existing) {
+      log.debug(`飞书文件夹已存在: ${folderName} (token: ${existing.token})`);
+      return existing.token;
+    }
+
+    const newToken = await this.apiClient.createFolder(folderName, rootToken);
+    log.info(`已创建飞书文件夹: ${folderName} (token: ${newToken})`);
+    return newToken;
+  }
+
+  /**
+   * 处理已删除的文件
+   */
+  private async handleDeletedFiles(
+    syncRecords: Record<string, FileSyncRecord>,
+    localFilePaths: Set<string>,
+    localFolderPath: string,
+    result: SyncResult,
+    folderConfigId?: string
+  ): Promise<void> {
+    const recordsToDelete: string[] = [];
+    for (const [filePath, record] of Object.entries(syncRecords)) {
+      // 只处理属于指定映射的记录
+      if (folderConfigId && record.folderConfigId && record.folderConfigId !== folderConfigId) {
+        continue;
+      }
+      // 只处理在监控文件夹下的记录
+      if (!filePath.startsWith(localFolderPath + '/') && filePath !== localFolderPath) {
+        continue;
+      }
+      if (!localFilePaths.has(filePath)) {
+        try {
+          log.info(`本地文件已删除，同步删除云端: ${filePath}`);
+          await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
+          recordsToDelete.push(filePath);
+          result.deletedCount++;
+          this.addLog('delete', filePath, `云端文件已删除 (token: ${record.cloudToken})`);
+        } catch (error) {
+          const errMsg = (error as Error).message || '';
+          if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+            const ipMsg = `删除云端文件 ${filePath} 失败：飞书应用 IP 白名单限制`;
+            result.errors.push(ipMsg);
+            this.addLog('error', filePath, ipMsg);
+            log.warn(ipMsg);
+            new Notice('飞书应用 IP 白名单限制，无法删除云端文件', 8000);
+            recordsToDelete.push(filePath);
+          } else {
+            const msg = `删除云端文件 ${filePath} 失败: ${errMsg}`;
+            result.errors.push(msg);
+            this.addLog('error', filePath, msg);
+            log.warn(msg);
+          }
+        }
+      }
+    }
+    // 从同步记录中移除已删除的文件
+    for (const key of recordsToDelete) {
+      delete syncRecords[key];
+    }
+  }
+
+  /**
+   * 并发上传文件
+   * @param cloudFiles 可选的预获取云端文件列表（用于新文件查重，避免每个文件单独调用 API）
+   */
+  private async uploadFiles(
+    localFiles: TFile[],
+    localFolderPath: string,
+    targetFolderToken: string,
+    syncRecords: Record<string, FileSyncRecord>,
+    result: SyncResult,
+    folderConfigId?: string,
+    cloudFiles?: FeishuFileMeta[]
+  ): Promise<void> {
     const pool = new ConcurrencyPool(this.plugin.settings.maxConcurrentUploads);
-    let authError: Error | null = null; // 授权错误标记，遇到后立即中止
+    let authError: Error | null = null;
 
     const uploadPromises = localFiles.map(file =>
       pool.run(async () => {
-        // 如果已经遇到授权错误，不再处理后续文件
         if (authError) return;
         try {
-          const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, syncRecords);
+          const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, syncRecords, folderConfigId, cloudFiles);
           if (uploaded) {
             result.uploadedCount++;
           } else {
@@ -228,7 +476,6 @@ export class SyncEngine {
           }
         } catch (error) {
           const errMsg = (error as Error).message || '';
-          // 授权错误：记录后立即中止，不再处理其他文件
           if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
             authError = error as Error;
             result.failedCount++;
@@ -240,64 +487,43 @@ export class SyncEngine {
           const errorMsg = `同步文件 ${file.path} 失败: ${errMsg}`;
           result.errors.push(errorMsg);
           this.addLog('error', file.path, errMsg);
-          console.error('[FeiSync]', errorMsg);
+          log.error(errorMsg);
         }
       })
     );
 
     await Promise.all(uploadPromises);
 
-    // 如果是授权错误，提前中止并给出明确提示
     if (authError) {
       result.success = false;
-      new Notice('同步失败：用户授权已失效，请在设置中重新进行飞书 OAuth 授权', 8000);
-      this.addLog('error', '', '同步因授权失效而中止，请重新授权');
-      await this.plugin.saveSyncRecords(syncRecords);
-      return result;
+      new Notice('同步失败：用户授权已失效，请重新授权', 8000);
+      this.addLog('error', '', '同步因授权失效而中止');
     }
-
-    // 8. 保存同步记录（已包含 saveData）
-    await this.plugin.saveSyncRecords(syncRecords);
-
-    // 9. 汇总结果
-    if (result.failedCount === 0) {
-      result.success = true;
-      const parts: string[] = [];
-      if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
-      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
-      if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
-      if (parts.length === 0) parts.push('无变化');
-      new Notice(`同步完成！${parts.join('，')}`);
-      this.addLog('info', '', `同步完成：${parts.join('，')}`);
-    } else {
-      result.success = false;
-      const msg = `同步完成：上传 ${result.uploadedCount}，跳过 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
-      new Notice(msg);
-      this.addLog('info', '', msg);
-    }
-
-    return result;
   }
 
   /**
    * 同步单个文件（增量判断）
+   * @param cloudFiles 可选的预获取云端文件列表（用于新文件查重）
    * @returns true 表示文件已上传，false 表示文件被跳过（未变化）
    */
   private async syncFile(
     file: TFile,
     localFolderPath: string,
     targetFolderToken: string,
-    syncRecords: Record<string, FileSyncRecord>
+    syncRecords: Record<string, FileSyncRecord>,
+    folderConfigId?: string,
+    cloudFiles?: FeishuFileMeta[]
   ): Promise<boolean> {
-    // 判断是否为二进制文件格式
-    const binaryExtensions = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'rar'];
+    // 使用白名单模式判断二进制文件
     const ext = file.extension.toLowerCase();
-    const isBinaryFile = binaryExtensions.indexOf(ext) !== -1;
+    const isBinary = isBinaryFile(ext);
+
+    log.debug(`同步文件: ${file.path}, 扩展名=${ext}, 二进制=${isBinary}`);
 
     // 读取文件内容
     let content: string | ArrayBuffer;
     try {
-      if (isBinaryFile) {
+      if (isBinary) {
         content = await this.vault.readBinary(file);
       } else {
         content = await this.vault.read(file);
@@ -310,6 +536,9 @@ export class SyncEngine {
     const currentHash = await computeHash(content);
 
     // 计算相对于监控文件夹的路径，确定目标文件夹
+    // file.path 格式如 "folder/sub/file.md"，pathParts = ["folder", "sub", "file.md"]
+    // - pathParts.length === 1：文件直接在根目录，不需要创建子文件夹
+    // - 否则：pathParts.slice(1, -1) 取中间部分作为子路径（如 "sub"），确保路径存在
     const relativePath = file.path;
     const pathParts = relativePath.split('/');
     let parentFolderToken: string;
@@ -321,51 +550,44 @@ export class SyncEngine {
       parentFolderToken = await this.apiClient.ensureFolderPath(subPath, targetFolderToken);
     }
 
-    // 查找已有的同步记录
-    const recordKey = file.path;
-    const existingRecord = syncRecords[recordKey];
+    // 查找已有的同步记录（兼容多种 recordKey 格式）
+    let recordKey = folderConfigId ? `${folderConfigId}::${file.path}` : file.path;
+    let existingRecord = syncRecords[recordKey];
 
-    // 增量判断：哈希相同且云端文件夹未变 → 还需验证云端文件是否仍然存在
-    if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
-      // 校验云端文件是否仍存在（可能被手动删除）
-      let cloudExists: boolean;
-      try {
-        cloudExists = await this.apiClient.checkFileExists(existingRecord.cloudToken, existingRecord.parentFolderToken, file.name);
-      } catch (checkError) {
-        // 授权错误等严重错误：向上抛出，中止同步
-        const errMsg = (checkError as Error).message || '';
-        if (errMsg.includes('授权已失效') || errMsg.includes('重新授权')) {
-          throw checkError;
+    // 兼容旧格式：如果找不到，尝试其他格式
+    if (!existingRecord) {
+      for (const [key, record] of Object.entries(syncRecords)) {
+        if (key.endsWith(`::${file.path}`) || key === file.path) {
+          existingRecord = record;
+          recordKey = key;
+          break;
         }
-        // 其他网络错误：保守地认为文件不存在，触发重新上传
-        console.warn(`[FeiSync] 检查云端文件存在性失败，将重新上传: ${file.path}`, checkError);
-        cloudExists = false;
       }
-      if (cloudExists) {
-        console.log(`[FeiSync] 文件未变化，跳过: ${file.path}`);
-        return false;
-      }
-      // 云端文件已不存在，清除旧记录，重新上传
-      console.log(`[FeiSync] 云端文件已不存在，需要重新上传: ${file.path}`);
-      delete syncRecords[recordKey];
-      this.addLog('upload', file.path, '云端文件已丢失，重新上传');
     }
 
-    // 文件有变化或为新文件，需要上传
+    // 增量判断：内容哈希相同 + 父目录相同
+    if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
+      // 内容未变化，跳过上传（不再检查云端存在性，避免不必要的 API 调用和网络延迟）
+      log.debug(`文件未变化，跳过: ${file.path}`);
+      return false;
+    }
+
+    // 内容变化或为新文件
     if (existingRecord) {
-      console.log(`[FeiSync] 文件已变化，重新上传: ${file.path}`);
+      log.info(`文件已变化，重新上传: ${file.path}`);
       this.addLog('upload', file.path, `文件已变化 (旧哈希: ${existingRecord.hash.substring(0, 8)}...)`);
     } else {
-      console.log(`[FeiSync] 新文件，上传: ${file.path}`);
+      log.info(`新文件，上传: ${file.path}`);
       this.addLog('upload', file.path, '新文件');
     }
 
-    // 执行上传（含删除旧文件逻辑）
+    // 执行上传
     const { fileToken, fileType } = await this.uploadFileContent(
       file,
       content,
       parentFolderToken,
-      existingRecord
+      existingRecord,
+      cloudFiles
     );
 
     // 更新同步记录
@@ -375,6 +597,7 @@ export class SyncEngine {
       cloudToken: fileToken,
       cloudType: fileType,
       parentFolderToken: parentFolderToken,
+      folderConfigId: folderConfigId,
     };
 
     return true;
@@ -382,13 +605,13 @@ export class SyncEngine {
 
   /**
    * 上传文件内容到飞书
-   * 如果存在旧记录，先删除旧文件再上传
    */
   private async uploadFileContent(
     file: TFile,
     content: string | ArrayBuffer,
     parentFolderToken: string,
-    existingRecord: FileSyncRecord | undefined
+    existingRecord: FileSyncRecord | undefined,
+    cloudFiles?: FeishuFileMeta[]
   ): Promise<{ fileToken: string; fileType: string }> {
     const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
 
@@ -400,33 +623,34 @@ export class SyncEngine {
     if (existingRecord) {
       try {
         await this.apiClient.deleteFile(existingRecord.cloudToken, existingRecord.cloudType);
-        console.log(`[FeiSync] 旧文件已删除`);
+        log.debug('旧文件已删除');
       } catch (deleteError) {
         const errMsg = (deleteError as Error).message || '';
         if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-          // IP 白名单限制导致删除失败，提示用户但仍继续上传
-          console.warn(`[FeiSync] 删除旧文件失败（IP 白名单限制），将上传为新文件，旧文件需手动删除`);
-          new Notice('飞书应用 IP 白名单限制，无法删除旧版本文件。请在飞书开放平台关闭 IP 限制或添加当前 IP', 8000);
-        } else if (errMsg.includes('1061007') || errMsg.includes('file has been delete')) {
-          // 旧文件已被删除（可能被其他方式删除），视为删除成功
-          console.log(`[FeiSync] 旧文件已不存在（已被删除），视为删除成功`);
+          log.warn('删除旧文件失败（IP 白名单限制），将上传为新文件');
+          new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
+        } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
+          // 1061007: 文件不存在，1061001: 未知错误（可能是并发导致文件已删除）
+          log.debug('旧文件已不存在或无法删除，视为删除成功');
         } else {
-          console.warn(`[FeiSync] 删除旧文件失败，继续上传新版本:`, deleteError);
+          log.warn('删除旧文件失败，继续上传:', deleteError);
         }
       }
     } else {
-      // 没有同步记录（新文件），但云端可能存在同名文件
-      try {
-        const existingFile = await this.apiClient.findFileByName(file.name, parentFolderToken);
-        if (existingFile) {
-          try {
-            await this.apiClient.deleteFile(existingFile.token, existingFile.type);
-          } catch (deleteError) {
-            console.warn(`[FeiSync] 删除同名文件失败，继续上传:`, deleteError);
-          }
+      // 没有同步记录（新文件），云端可能存在同名文件
+      // 优先使用预获取的云端文件列表（性能优化），无列表时回退到 API 查询
+      const existingFile = cloudFiles
+        ? cloudFiles.find(f =>
+            (f.name === file.name || f.name === file.name.replace(/\.[^.]+$/, '')) &&
+            (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
+          )
+        : await this.apiClient.findFileByName(file.name, parentFolderToken);
+      if (existingFile) {
+        try {
+          await this.apiClient.deleteFile(existingFile.token, existingFile.type);
+        } catch (deleteError) {
+          log.warn('删除同名文件失败，继续上传:', deleteError);
         }
-      } catch (error) {
-        console.warn(`[FeiSync] 检查云端文件存在性失败，继续上传:`, error);
       }
     }
 
@@ -442,33 +666,59 @@ export class SyncEngine {
       fileSize
     );
 
-    console.log(`[FeiSync] 文件上传成功，token: ${fileToken}`);
+    log.debug(`文件上传成功，token: ${fileToken}`);
     return { fileToken, fileType: 'file' };
   }
 
   /**
    * 处理文件重命名
-   * 删除旧路径的云端文件，上传新路径
    */
   async handleRename(oldPath: string, newPath: string): Promise<void> {
     const syncRecords = await this.plugin.loadSyncRecords();
-    const oldRecord = syncRecords[oldPath];
 
-    if (oldRecord) {
-      // 删除旧路径的云端文件
-      try {
-        await this.apiClient.deleteFile(oldRecord.cloudToken, oldRecord.cloudType);
-        console.log(`[FeiSync] 重命名：已删除旧路径云端文件 ${oldPath}`);
-        this.addLog('delete', oldPath, `重命名为 ${newPath}，删除旧云端文件`);
-      } catch (error) {
-        console.warn(`[FeiSync] 删除旧路径云端文件失败:`, error);
+    // 尝试多种 recordKey 格式查找旧记录
+    let oldRecord: FileSyncRecord | undefined;
+    let oldRecordKey: string | undefined;
+
+    // 先尝试不带 folderConfigId 的 key
+    if (syncRecords[oldPath]) {
+      oldRecord = syncRecords[oldPath];
+      oldRecordKey = oldPath;
+    } else {
+      // 尝试带 folderConfigId 前缀的 key
+      for (const [key, record] of Object.entries(syncRecords)) {
+        if (key.endsWith(`::${oldPath}`) || key === oldPath) {
+          oldRecord = record;
+          oldRecordKey = key;
+          break;
+        }
       }
-      // 移除旧记录
-      delete syncRecords[oldPath];
     }
 
-    // 新文件会在下次同步时自动上传
-    // 如果启用了自动同步，立即触发
+    if (oldRecord) {
+      try {
+        await this.apiClient.deleteFile(oldRecord.cloudToken, oldRecord.cloudType);
+        log.info(`重命名：已删除旧路径云端文件 ${oldPath}`);
+        this.addLog('delete', oldPath, `重命名为 ${newPath}，删除旧云端文件`);
+      } catch (deleteError) {
+        const errMsg = (deleteError as Error).message || '';
+        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+          log.warn(`重命名 ${oldPath} → ${newPath}：删除旧文件失败（IP 白名单限制）`);
+          new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
+          this.addLog('warn', oldPath, `重命名时删除旧云端文件失败（IP 白名单限制）`);
+        } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
+          // 1061007: 文件不存在，1061001: 未知错误（可能是并发导致文件已删除）
+          log.debug(`重命名：旧云端文件 ${oldPath} 已不存在或无法删除，视为删除成功`);
+        } else {
+          log.warn(`重命名 ${oldPath} → ${newPath}：删除旧云端文件失败，继续重命名流程:`, deleteError);
+          this.addLog('warn', oldPath, `删除旧云端文件失败: ${(deleteError as Error).message}`);
+        }
+      }
+      if (oldRecordKey) {
+        delete syncRecords[oldRecordKey];
+      }
+    }
+
     await this.plugin.saveSyncRecords(syncRecords);
   }
 
@@ -481,25 +731,42 @@ export class SyncEngine {
     }
 
     const syncRecords = await this.plugin.loadSyncRecords();
-    const record = syncRecords[filePath];
+
+    // 尝试多种 recordKey 格式
+    let record: FileSyncRecord | undefined;
+    let recordKey: string | undefined;
+
+    if (syncRecords[filePath]) {
+      record = syncRecords[filePath];
+      recordKey = filePath;
+    } else {
+      for (const [key, rec] of Object.entries(syncRecords)) {
+        if (key.endsWith(`::${filePath}`) || key === filePath) {
+          record = rec;
+          recordKey = key;
+          break;
+        }
+      }
+    }
 
     if (record) {
       try {
         await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
-        console.log(`[FeiSync] 已删除云端文件: ${filePath}`);
-        this.addLog('delete', filePath, `本地文件已删除，同步删除云端文件`);
+        log.info(`已删除云端文件: ${filePath}`);
+        this.addLog('delete', filePath, '本地文件已删除，同步删除云端文件');
       } catch (error) {
-        console.warn(`[FeiSync] 删除云端文件失败:`, error);
+        log.warn('删除云端文件失败:', error);
         this.addLog('error', filePath, `删除云端文件失败: ${(error as Error).message}`);
       }
-      delete syncRecords[filePath];
+      if (recordKey) {
+        delete syncRecords[recordKey];
+      }
       await this.plugin.saveSyncRecords(syncRecords);
     }
   }
 
   /**
    * 从飞书下载文件到本地
-   * 将飞书目标文件夹下的所有文件下载到本地同步文件夹
    */
   async downloadFromFeishu(): Promise<SyncResult> {
     const result: SyncResult = {
@@ -512,29 +779,43 @@ export class SyncEngine {
       errors: [],
     };
 
-    const { localFolderPath, feishuRootFolderToken } = this.plugin.settings;
+    // 支持多文件夹下载
+    const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
 
-    if (!localFolderPath) {
-      result.success = false;
-      result.errors.push('未配置本地同步文件夹路径');
-      new Notice('下载失败：未配置本地同步文件夹路径');
-      return result;
-    }
-
-    let targetFolderToken = feishuRootFolderToken;
-    if (!targetFolderToken) {
-      targetFolderToken = await this.ensureDefaultFolder();
-    }
-
-    new Notice('开始从飞书下载文件...');
-    this.addLog('info', '', '开始从飞书下载文件');
-
-    try {
-      await this.downloadFolder(targetFolderToken, localFolderPath, result);
-    } catch (error) {
-      result.failedCount++;
-      result.errors.push(`下载失败: ${(error as Error).message}`);
-      this.addLog('error', '', `下载失败: ${(error as Error).message}`);
+    if (enabledConfigs.length > 0) {
+      for (const config of enabledConfigs) {
+        let targetFolderToken = config.remoteFolderToken;
+        if (!targetFolderToken) {
+          targetFolderToken = await this.ensureFolderForMapping(config);
+        }
+        new Notice(`从飞书下载 "${config.localPath}"...`);
+        try {
+          await this.downloadFolder(targetFolderToken, config.localPath, result);
+        } catch (error) {
+          result.failedCount++;
+          result.errors.push(`下载 "${config.localPath}" 失败: ${(error as Error).message}`);
+        }
+      }
+    } else {
+      // 旧版兼容
+      const { localFolderPath, feishuRootFolderToken } = this.plugin.settings;
+      if (!localFolderPath) {
+        result.success = false;
+        result.errors.push('未配置本地同步文件夹路径');
+        new Notice('下载失败：未配置本地同步文件夹路径');
+        return result;
+      }
+      let targetFolderToken = feishuRootFolderToken;
+      if (!targetFolderToken) {
+        targetFolderToken = await this.ensureDefaultFolder();
+      }
+      new Notice('开始从飞书下载文件...');
+      try {
+        await this.downloadFolder(targetFolderToken, localFolderPath, result);
+      } catch (error) {
+        result.failedCount++;
+        result.errors.push(`下载失败: ${(error as Error).message}`);
+      }
     }
 
     if (result.failedCount === 0) {
@@ -563,20 +844,15 @@ export class SyncEngine {
     try {
       files = await this.apiClient.listFolderContents(folderToken);
     } catch (error) {
-      console.warn(`[FeiSync] 列出文件夹内容失败:`, error);
+      log.warn('列出文件夹内容失败:', error);
       return;
     }
 
-    console.log(`[FeiSync][DEBUG] downloadFolder: folderToken=${folderToken}, 找到 ${files.length} 个项目`);
-    for (const f of files) {
-      console.log(`[FeiSync][DEBUG]   - ${f.name} (type=${f.type}, token=${f.token})`);
-    }
+    log.debug(`downloadFolder: folderToken=${folderToken}, 找到 ${files.length} 个项目`);
 
     for (const file of files) {
       if (file.type === 'folder') {
-        // 递归下载子文件夹
         const subLocalPath = localPath ? `${localPath}/${file.name}` : file.name;
-        // 确保本地子文件夹存在
         const folder = this.vault.getFolderByPath(subLocalPath);
         if (!folder) {
           try {
@@ -587,25 +863,22 @@ export class SyncEngine {
         }
         await this.downloadFolder(file.token, subLocalPath, result);
       } else {
-        // 下载文件
         try {
           await this.downloadSingleFile(file, localPath, result);
         } catch (error) {
           const errMsg = (error as Error).message || '';
-          // 权限不足导致的导出失败，给出明确提示而非标记为普通错误
-          if (errMsg.includes('99991679') || errMsg.includes('drive:export:readonly') || errMsg.includes('docs:document:export')) {
+          if (errMsg.includes('99991679') || errMsg.includes('drive:export:readonly')) {
             result.failedCount++;
-            const skipMsg = `跳过在线文档 ${file.name}（导出权限不足，请在插件设置中重新点击"授权"按钮获取新权限。确保飞书开发者后台已开通 drive:export:readonly 和 docs:document:export 权限）`;
+            const skipMsg = `跳过在线文档 ${file.name}（导出权限不足，请重新授权）`;
             result.errors.push(skipMsg);
             this.addLog('error', `${localPath}/${file.name}`, skipMsg);
-            console.warn('[FeiSync]', skipMsg);
-            new Notice(`飞书导出权限不足，请重新授权`, 0);
+            new Notice('飞书导出权限不足，请重新授权', 0);
           } else {
             result.failedCount++;
             const errorMsg = `下载文件 ${file.name} 失败: ${errMsg}`;
             result.errors.push(errorMsg);
             this.addLog('error', `${localPath}/${file.name}`, errMsg);
-            console.error('[FeiSync]', errorMsg);
+            log.error(errorMsg);
           }
         }
       }
@@ -613,10 +886,9 @@ export class SyncEngine {
   }
 
   /**
-   * 根据文件类型确定下载后的本地文件名（添加扩展名）
+   * 根据文件类型确定下载后的本地文件名
    */
   private getLocalFileName(remoteName: string, remoteType: string): string {
-    // 在线文档在飞书中的 name 通常不含扩展名，需要根据导出格式补上
     const extensionMap: Record<string, string> = {
       'docx': '.docx',
       'doc': '.docx',
@@ -643,15 +915,12 @@ export class SyncEngine {
     const localName = this.getLocalFileName(remoteFile.name, remoteFile.type);
     const filePath = localPath ? `${localPath}/${localName}` : localName;
 
-    console.log(`[FeiSync][DEBUG] downloadSingleFile: name=${remoteFile.name}, type=${remoteFile.type}, token=${remoteFile.token}, filePath=${filePath}`);
+    log.debug(`下载文件: name=${remoteFile.name}, type=${remoteFile.type}, filePath=${filePath}`);
 
-    // 检查本地是否已有该文件
     const localFile = this.vault.getAbstractFileByPath(filePath);
     if (localFile instanceof TFile) {
-      // 比较哈希决定是否跳过
       const localContent = await this.vault.readBinary(localFile);
       const localHash = await computeHash(localContent);
-      // 下载云端文件计算哈希
       const remoteContent = await this.apiClient.downloadFile(remoteFile.token, remoteFile.type);
       const remoteHash = await computeHash(remoteContent);
 
@@ -661,16 +930,12 @@ export class SyncEngine {
         return;
       }
 
-      // 内容不同，覆盖本地
       await this.vault.modifyBinary(localFile, remoteContent);
       result.downloadedCount++;
       this.addLog('download', filePath, '本地文件已更新（覆盖）');
-      console.log(`[FeiSync] 文件已更新: ${filePath}`);
+      log.info(`文件已更新: ${filePath}`);
     } else {
-      // 本地不存在，创建新文件
       const content = await this.apiClient.downloadFile(remoteFile.token, remoteFile.type);
-
-      // 确保父文件夹存在
       const parentPath = filePath.substring(0, filePath.lastIndexOf('/'));
       if (parentPath) {
         const parentFolder = this.vault.getFolderByPath(parentPath);
@@ -682,22 +947,21 @@ export class SyncEngine {
           }
         }
       }
-
       await this.vault.createBinary(filePath, new Uint8Array(content));
       result.downloadedCount++;
       this.addLog('download', filePath, '新文件已下载');
-      console.log(`[FeiSync] 新文件已下载: ${filePath}`);
+      log.info(`新文件已下载: ${filePath}`);
     }
   }
 
   /**
-   * 扫描本地文件夹，获取所有文件列表
+   * 扫描本地文件夹，获取所有文件列表（应用忽略规则）
    */
   private scanLocalFolder(folderPath: string): TFile[] {
     const files: TFile[] = [];
     const folder = this.vault.getFolderByPath(folderPath);
     if (!folder) {
-      console.warn('[FeiSync] 本地文件夹不存在:', folderPath);
+      log.warn('本地文件夹不存在:', folderPath);
       return files;
     }
     this.collectFiles(folder, files);
@@ -705,13 +969,27 @@ export class SyncEngine {
   }
 
   /**
-   * 递归收集文件夹中的所有文件
+   * 递归收集文件夹中的所有文件（应用忽略规则）
    */
   private collectFiles(folder: TFolder, files: TFile[]): void {
     for (const child of folder.children) {
       if (child instanceof TFile) {
+        // 跳过 .feisyncignore 文件本身
+        if (child.name === FEISYNC_IGNORE_FILE) {
+          continue;
+        }
+        // 应用忽略规则
+        if (this.ignoreFilter.hasRules && this.ignoreFilter.shouldIgnore(child.path, false)) {
+          log.debug(`忽略文件: ${child.path}`);
+          continue;
+        }
         files.push(child);
       } else if (child instanceof TFolder) {
+        // 应用忽略规则（目录级别）
+        if (this.ignoreFilter.hasRules && this.ignoreFilter.shouldIgnoreFolder(child.path)) {
+          log.debug(`忽略目录: ${child.path}`);
+          continue;
+        }
         this.collectFiles(child, files);
       }
     }
@@ -728,6 +1006,26 @@ export class SyncEngine {
       return existing.token;
     }
     return await this.apiClient.createFolder(defaultFolderName, rootFolderToken);
+  }
+
+  /**
+   * 汇报同步结果
+   */
+  private reportResult(result: SyncResult): void {
+    if (result.failedCount === 0) {
+      const parts: string[] = [];
+      if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
+      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
+      if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
+      if (parts.length === 0) parts.push('无变化');
+      const msg = `同步完成！${parts.join('，')}`;
+      new Notice(msg);
+      this.addLog('info', '', msg);
+    } else {
+      const msg = `同步完成：上传 ${result.uploadedCount}，跳过 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
+      new Notice(msg);
+      this.addLog('info', '', msg);
+    }
   }
 
   /**

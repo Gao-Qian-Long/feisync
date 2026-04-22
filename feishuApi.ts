@@ -5,6 +5,10 @@
 
 import { requestUrl, RequestUrlParam } from 'obsidian';
 import { FeishuAuthManager } from './feishuAuth';
+import { createLogger } from './logger';
+import { getFeishuFileType } from './fileTypeUtils';
+
+const log = createLogger('FeishuApi');
 
 // 请求超时时间（毫秒）
 const REQUEST_TIMEOUT = 30000;
@@ -32,6 +36,8 @@ class RateLimiter {
   private timestamps: number[] = [];
   private maxRequests: number;
   private windowMs: number;
+  /** 使用 Promise 链实现互斥锁，避免并发请求同时通过 timestamps.length 检查 */
+  private lock: Promise<void> = Promise.resolve();
 
   constructor(maxRequests: number = API_RATE_LIMIT_QPS, windowMs: number = RATE_LIMIT_WINDOW) {
     this.maxRequests = maxRequests;
@@ -39,26 +45,27 @@ class RateLimiter {
   }
 
   /**
-   * 等待直到可以发送请求
+   * 等待直到可以发送请求（线程安全）
    */
   async acquire(): Promise<void> {
-    const now = Date.now();
-    // 清理超出时间窗口的时间戳
-    this.timestamps = this.timestamps.filter(t => now - t < this.windowMs);
+    // 将本次等待操作追加到锁链尾部，等待前面的操作完成后再执行本轮检查
+    this.lock = this.lock.then(async () => {
+      const now = Date.now();
+      // 清理超出时间窗口的时间戳
+      this.timestamps = this.timestamps.filter(t => now - t < this.windowMs);
 
-    if (this.timestamps.length >= this.maxRequests) {
-      // 需要等待直到最早的请求超出窗口
-      const oldestInWindow = this.timestamps[0];
-      const waitTime = this.windowMs - (now - oldestInWindow) + 10; // 额外10ms缓冲
-      if (waitTime > 0) {
-        console.log(`[FeiSync] 速率限制：等待 ${waitTime}ms`);
+      if (this.timestamps.length >= this.maxRequests) {
+        // 需要等待直到最早的请求超出窗口
+        const oldestInWindow = this.timestamps[0];
+        const waitTime = this.windowMs - (now - oldestInWindow) + 10; // 额外10ms缓冲
+        log.debug(`速率限制：等待 ${waitTime}ms`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
+        // 等待结束后，由链中的下一个 .then() 重新检查并记录
+      } else {
+        this.timestamps.push(now);
       }
-      // 递归重试
-      return this.acquire();
-    }
-
-    this.timestamps.push(Date.now());
+    });
+    await this.lock;
   }
 }
 
@@ -88,7 +95,7 @@ async function withRetry<T>(
 
       if (attempt < maxRetries) {
         const delay = 1000 * Math.pow(2, attempt); // 指数退避：1s, 2s, 4s
-        console.warn(`[FeiSync] ${description}失败 (尝试 ${attempt + 1}/${maxRetries + 1})，${delay}ms 后重试:`, msg);
+        log.warn(`${description}失败 (尝试 ${attempt + 1}/${maxRetries + 1})，${delay}ms 后重试: ${msg}`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -155,7 +162,7 @@ export class FeishuApiClient {
       } catch (error) {
         // 用户已授权但 token 获取/刷新失败，不再回退到 tenant_access_token
         // 因为回退会导致：1) IP 白名单限制 (99991401) 2) 文件所有者变为应用而非用户
-        console.error('[FeiSync] 获取 user_access_token 失败，需要重新授权:', error);
+        log.error('获取 user_access_token 失败，需要重新授权:', error);
         throw new Error('用户授权已失效，请在设置中重新进行飞书 OAuth 授权');
       }
     } else if (this.authManager.wasUserAuthorized()) {
@@ -265,10 +272,10 @@ export class FeishuApiClient {
         try {
           const errorData = response.json;
           errorMsg = `HTTP ${response.status}: ${JSON.stringify(errorData)}`;
-          console.error('[FeiSync] API 错误详情:', errorData);
+          log.error('API 错误详情:', errorData);
         } catch {
           errorMsg = `HTTP ${response.status}: ${responseText.substring(0, 500)}`;
-          console.error('[FeiSync] API 错误原始响应:', responseText);
+          log.error('API 错误原始响应:', responseText);
         }
         throw new Error(errorMsg);
       }
@@ -342,7 +349,7 @@ export class FeishuApiClient {
       const files = await this.listFolderContents(parentToken);
       return files.find(f => f.name === folderName && f.type === 'folder') || null;
     } catch (error) {
-      console.error('[FeiSync] 查找文件夹失败:', error);
+      log.error('查找文件夹失败:', error);
       return null;
     }
   }
@@ -398,7 +405,7 @@ export class FeishuApiClient {
 
       return allFiles;
     } catch (error) {
-      console.error('[FeiSync] 列出文件夹内容失败:', error);
+      log.error('列出文件夹内容失败:', error);
       throw error;
     }
   }
@@ -430,9 +437,14 @@ export class FeishuApiClient {
         throw new Error(`创建文件夹失败: ${data.msg}`);
       }
 
-      return data.data?.file_token || '';
+      // API 响应字段是 token，不是 file_token
+      const folderToken = data.data?.token || '';
+      if (!folderToken) {
+        throw new Error('创建文件夹成功但未返回 token');
+      }
+      return folderToken;
     } catch (error) {
-      console.error('[FeiSync] 创建文件夹失败:', error);
+      log.error('创建文件夹失败:', error);
       throw error;
     }
   }
@@ -473,7 +485,8 @@ export class FeishuApiClient {
   }
 
   /**
-   * 全量上传文件（≤20MB）
+   * 全量上传文件到云空间（≤20MB）
+   * 使用 /drive/v1/files/upload_all 接口（官方推荐用于上传文件到云空间）
    */
   private async uploadFileAll(
     fileContent: ArrayBuffer | Uint8Array,
@@ -485,17 +498,23 @@ export class FeishuApiClient {
       const headers = await this.getHeaders();
       delete headers['Content-Type'];
 
+      // 根据文件扩展名确定 file_type
+      const ext = fileName.split('.').pop()?.toLowerCase() || '';
+      const fileType = getFeishuFileType(ext);
+      log.info(`上传文件到云空间: ${fileName}, file_type=${fileType}, size=${(size / 1024).toFixed(1)}KB`);
+
       const formData = new FormData();
       formData.append('file_name', fileName);
       formData.append('parent_type', 'explorer');
       formData.append('parent_node', parentFolderToken);
       formData.append('size', size.toString());
+      formData.append('file_type', fileType);
 
       const blob = new Blob([fileContent]);
       formData.append('file', blob, fileName);
 
       const data = await this.apiRequest(
-        this.getApiUrl('/open-apis/drive/v1/medias/upload_all'),
+        this.getApiUrl('/open-apis/drive/v1/files/upload_all'),
         {
           method: 'POST',
           headers,
@@ -509,19 +528,22 @@ export class FeishuApiClient {
         throw new Error(`上传文件失败: ${data.msg}`);
       }
 
-      return data.data?.file_token || '';
+      const fileToken = data.data?.file_token || '';
+      log.debug(`上传成功: ${fileName} → token=${fileToken}`);
+      return fileToken;
     } catch (error) {
-      console.error('[FeiSync] 上传文件失败:', error);
+      log.error('上传文件失败:', error);
       throw error;
     }
   }
 
   /**
-   * 分片上传文件（>20MB）
+   * 分片上传文件到云空间（>20MB）
    * 飞书分片上传流程：
    * 1. 预上传（创建上传会话）
    * 2. 逐片上传
    * 3. 完成上传
+   * 使用 /drive/v1/files/ 系列接口（官方推荐用于上传文件到云空间）
    */
   private async uploadFileChunked(
     fileContent: ArrayBuffer | Uint8Array,
@@ -532,6 +554,10 @@ export class FeishuApiClient {
     const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB 每片
 
     try {
+      // 根据文件扩展名确定 file_type
+      const ext = fileName.split('.').pop()?.toLowerCase() || '';
+      const fileType = getFeishuFileType(ext);
+
       // 步骤1：预上传
       const headers = await this.getHeaders();
       const preUploadBody = {
@@ -540,12 +566,13 @@ export class FeishuApiClient {
         parent_node: parentFolderToken,
         size: size,
         block_size: CHUNK_SIZE,
+        file_type: fileType,
       };
 
-      console.log(`[FeiSync] 分片上传预请求: ${fileName}, 大小: ${(size / 1024 / 1024).toFixed(2)}MB`);
+      log.info(`分片上传预请求: ${fileName}, file_type=${fileType}, 大小: ${(size / 1024 / 1024).toFixed(2)}MB`);
 
       const preUploadData = await this.apiRequest(
-        this.getApiUrl('/open-apis/drive/v1/medias/upload_prepare'),
+        this.getApiUrl('/open-apis/drive/v1/files/upload_prepare'),
         {
           method: 'POST',
           headers,
@@ -566,7 +593,7 @@ export class FeishuApiClient {
         throw new Error('分片预上传成功但未返回 upload_id');
       }
 
-      console.log(`[FeiSync] 分片上传会话已创建，upload_id: ${uploadId}, 分片数: ${blockNums}`);
+      log.debug(`分片上传会话已创建，upload_id: ${uploadId}, 分片数: ${blockNums}`);
 
       // 步骤2：逐片上传
       const uint8Content = fileContent instanceof Uint8Array ? fileContent : new Uint8Array(fileContent);
@@ -588,7 +615,7 @@ export class FeishuApiClient {
         formData.append('file', blob, `${fileName}.part${i}`);
 
         const chunkData = await this.apiRequest(
-          this.getApiUrl('/open-apis/drive/v1/medias/upload_block'),
+          this.getApiUrl('/open-apis/drive/v1/files/upload_block'),
           {
             method: 'POST',
             headers: uploadHeaders,
@@ -603,7 +630,7 @@ export class FeishuApiClient {
         }
 
         blockSeqList.push(i);
-        console.log(`[FeiSync] 分片 ${i + 1}/${blockNums} 上传完成`);
+        log.debug(`分片 ${i + 1}/${blockNums} 上传完成`);
       }
 
       // 步骤3：完成上传
@@ -615,7 +642,7 @@ export class FeishuApiClient {
       };
 
       const completeData = await this.apiRequest(
-        this.getApiUrl('/open-apis/drive/v1/medias/upload_finish'),
+        this.getApiUrl('/open-apis/drive/v1/files/upload_finish'),
         {
           method: 'POST',
           headers: completeHeaders,
@@ -630,10 +657,10 @@ export class FeishuApiClient {
       }
 
       const fileToken = completeData.data?.file_token || '';
-      console.log(`[FeiSync] 分片上传完成，file_token: ${fileToken}`);
+      log.info(`分片上传完成，file_token: ${fileToken}`);
       return fileToken;
     } catch (error) {
-      console.error('[FeiSync] 分片上传失败:', error);
+      log.error('分片上传失败:', error);
       throw error;
     }
   }
@@ -657,11 +684,11 @@ export class FeishuApiClient {
       throw new Error('文件 token 不能为空');
     }
 
-    console.log(`[FeiSync][DEBUG] downloadFile 开始: token=${fileToken}, type=${fileType}`);
+    log.debug(`downloadFile 开始: token=${fileToken}, type=${fileType}`);
 
     // 在线文档需要先导出再下载
     if (['docx', 'sheet', 'bitable', 'doc', 'slides'].includes(fileType)) {
-      console.log(`[FeiSync][DEBUG] 检测到在线文档类型 ${fileType}，使用导出流程`);
+      log.debug(`检测到在线文档类型 ${fileType}，使用导出流程`);
       return this.exportAndDownload(fileToken, fileType);
     }
 
@@ -670,34 +697,34 @@ export class FeishuApiClient {
 
     // 策略1: /files/{token}/download（适用于云空间原生文件）
     try {
-      console.log(`[FeiSync][DEBUG] 尝试 /files/ 端点下载...`);
+      log.debug(`尝试 /files/ 端点下载...`);
       const result = await this.downloadWithRetry(
         `/open-apis/drive/v1/files/${fileToken}/download`,
         'files'
       );
-      console.log(`[FeiSync][DEBUG] /files/ 端点下载成功，大小: ${result.byteLength} bytes`);
+      log.debug(`/files/ 端点下载成功，大小: ${result.byteLength} bytes`);
       return result;
     } catch (filesError) {
       lastError = filesError as Error;
-      console.warn(`[FeiSync][DEBUG] /files/ 端点失败: ${lastError.message}`);
+      log.debug(`/files/ 端点失败: ${lastError.message}`);
     }
 
     // 策略2: /medias/{token}/download（适用于素材文件）
     try {
-      console.log(`[FeiSync][DEBUG] 尝试 /medias/ 端点下载...`);
+      log.debug(`尝试 /medias/ 端点下载...`);
       const result = await this.downloadWithRetry(
-        `/open-apis/drive/v1/medias/${fileToken}/download?file_type=${fileType}`,
+        `/open-apis/drive/v1/medias/${fileToken}/download`,
         'medias'
       );
-      console.log(`[FeiSync][DEBUG] /medias/ 端点下载成功，大小: ${result.byteLength} bytes`);
+      log.debug(`/medias/ 端点下载成功，大小: ${result.byteLength} bytes`);
       return result;
     } catch (mediasError) {
       const mediasErr = mediasError as Error;
-      console.warn(`[FeiSync][DEBUG] /medias/ 端点也失败: ${mediasErr.message}`);
+      log.debug(`/medias/ 端点也失败: ${mediasErr.message}`);
     }
 
     const errorMsg = `下载文件失败（/files/ 和 /medias/ 端点均失败）: /files/ 错误: ${lastError?.message}`;
-    console.error('[FeiSync]', errorMsg);
+    log.error(errorMsg);
     throw new Error(errorMsg);
   }
 
@@ -717,7 +744,7 @@ export class FeishuApiClient {
         await this.rateLimiter.acquire();
 
         const endpoint = this.getApiUrl(apiPath);
-        console.log(`[FeiSync][DEBUG] 下载请求: ${endpoint} (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})`);
+        log.debug(`下载请求: ${endpoint} (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})`);
 
         const response = await requestUrl({
           url: endpoint,
@@ -726,13 +753,13 @@ export class FeishuApiClient {
           throw: false,
         });
 
-        console.log(`[FeiSync][DEBUG] 响应状态: ${response.status}`);
+        log.debug(`响应状态: ${response.status}`);
 
         if (response.status >= 400) {
           let errorMsg = `HTTP ${response.status}`;
           try {
             const errorData = response.json;
-            console.log(`[FeiSync][DEBUG] 错误响应内容: ${JSON.stringify(errorData).substring(0, 500)}`);
+            log.debug(`错误响应内容: ${JSON.stringify(errorData).substring(0, 500)}`);
             errorMsg = `HTTP ${response.status}: ${errorData.msg || JSON.stringify(errorData)}`;
           } catch {
             // 不是 JSON 错误响应
@@ -742,7 +769,7 @@ export class FeishuApiClient {
 
         // requestUrl 的 arrayBuffer 属性直接获取二进制数据
         const result = response.arrayBuffer;
-        console.log(`[FeiSync][DEBUG] 下载成功，大小: ${result.byteLength} bytes`);
+        log.debug(`下载成功，大小: ${result.byteLength} bytes`);
         return result;
       } catch (error) {
         lastError = error as Error;
@@ -750,13 +777,13 @@ export class FeishuApiClient {
 
         // 不重试 4xx 错误（除了 429 限流）
         if (msg.includes('HTTP 4') && !msg.includes('HTTP 429')) {
-          console.warn(`[FeiSync][DEBUG] ${endpointName} 端点 ${msg}，不再重试`);
+          log.debug(`${endpointName} 端点 ${msg}，不再重试`);
           break;
         }
 
         if (attempt < this.maxRetryAttempts) {
           const delay = 1000 * Math.pow(2, attempt);
-          console.warn(`[FeiSync][DEBUG] ${endpointName} 端点下载失败 (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})，${delay}ms 后重试:`, msg);
+          log.debug(`${endpointName} 端点下载失败 (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})，${delay}ms 后重试: ${msg}`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
@@ -780,7 +807,7 @@ export class FeishuApiClient {
     };
     const exportType = exportTypeMap[fileType] || 'docx';
 
-    console.log(`[FeiSync][DEBUG] 创建导出任务: token=${fileToken}, type=${fileType}, exportType=${exportType}`);
+    log.debug(`创建导出任务: token=${fileToken}, type=${fileType}, exportType=${exportType}`);
 
     // 步骤1: 创建导出任务
     const headers = await this.getHeaders(true); // 导出必须使用 user_access_token
@@ -823,7 +850,7 @@ export class FeishuApiClient {
       throw new Error('创建导出任务成功但未返回 ticket');
     }
 
-    console.log(`[FeiSync][DEBUG] 导出任务已创建，ticket: ${ticket}`);
+    log.debug(`导出任务已创建，ticket: ${ticket}`);
 
     // 步骤2: 轮询导出任务
     let exportFileToken: string | null = null;
@@ -849,7 +876,7 @@ export class FeishuApiClient {
         exportFileToken = result.file_token;
         break;
       } else if (result.job_status === 1 || result.job_status === 2) {
-        console.log(`[FeiSync][DEBUG] 导出任务进行中 (status: ${result.job_status})...`);
+        log.debug(`导出任务进行中 (status: ${result.job_status})...`);
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       } else {
@@ -861,7 +888,7 @@ export class FeishuApiClient {
       throw new Error('导出任务超时');
     }
 
-    console.log(`[FeiSync][DEBUG] 导出完成，file_token: ${exportFileToken}`);
+    log.debug(`导出完成，file_token: ${exportFileToken}`);
 
     // 步骤3: 下载导出文件
     return this.downloadWithRetry(
@@ -893,21 +920,21 @@ export class FeishuApiClient {
       if (data.code !== 0) {
         // 错误码 1061007 表示文件已被删除，视为成功
         if (data.code === 1061007) {
-          console.log(`[FeiSync] 文件已不存在（已被删除），视为删除成功`);
+          log.info(`文件 ${fileToken} 已不存在（已被删除），视为删除成功`);
           return;
         }
         throw new Error(`删除文件失败: ${data.msg}`);
       }
 
-      console.log(`[FeiSync] 文件删除成功`);
+      log.info(`文件 ${fileToken} 删除成功`);
     } catch (error) {
       // 捕获 HTTP 404 且包含 "file has been delete" 的情况，也视为成功
       const errMsg = (error as Error).message || '';
       if (errMsg.includes('1061007') || errMsg.includes('file has been delete')) {
-        console.log(`[FeiSync] 文件已不存在（已被删除），视为删除成功`);
+        log.info(`文件 ${fileToken} 已不存在（已被删除），视为删除成功`);
         return;
       }
-      console.error('[FeiSync] 删除文件失败:', error);
+      log.error('删除文件失败:', error);
       throw error;
     }
   }
@@ -916,17 +943,19 @@ export class FeishuApiClient {
 
   /**
    * 查找文件（根据名称和父文件夹）
+   * 注意：飞书导出的文件可能去除了扩展名，因此同时匹配原名和无扩展名形式
    */
   async findFileByName(fileName: string, parentToken: string): Promise<FeishuFileMeta | null> {
     try {
       const files = await this.listFolderContents(parentToken);
-      const localNameWithoutExt = fileName.replace(/\.[^.]+$/, '');
+      // 飞书导出的文件可能被去除了扩展名，尝试两种形式匹配
+      const nameWithoutExtension = fileName.replace(/\.[^.]+$/, '');
       return files.find(f =>
-        (f.name === fileName || f.name === localNameWithoutExt) &&
+        (f.name === fileName || f.name === nameWithoutExtension) &&
         (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
       ) || null;
     } catch (error) {
-      console.error('[FeiSync] 查找文件失败:', error);
+      log.error('查找文件失败:', error);
       return null;
     }
   }
@@ -949,7 +978,7 @@ export class FeishuApiClient {
         throw error;
       }
       // 其他错误（如网络问题），保守地认为文件可能已不存在
-      console.warn('[FeiSync] 检查文件存在性失败:', error);
+      log.warn('检查文件存在性失败:', error);
       return false;
     }
   }
@@ -957,11 +986,12 @@ export class FeishuApiClient {
   // ==================== 工具方法 ====================
 
   /**
-   * 检查文件大小是否在限制范围内（分片上传无上限）
+   * 检查文件大小是否在限制范围内
+   * @returns true = 可直接全量上传(≤20MB), false = 需要分片上传
    */
   checkFileSize(sizeInBytes: number): boolean {
-    // 使用分片上传后理论上无大小限制，但单次全量上传限制 20MB
-    return true;
+    const limitBytes = 20 * 1024 * 1024; // 20MB
+    return sizeInBytes <= limitBytes;
   }
 
   /**
@@ -1000,11 +1030,9 @@ export class FeishuApiClient {
           : new Blob([fileContent]).size;
       formData.append('size', fileSize.toString());
 
-      const extraParams = {
-        obj_type: 'docx',
-        file_extension: fileExtension
-      };
-      formData.append('extra', JSON.stringify(extraParams));
+      // extra 字段官方仅记录 {"drive_route_token":"xxx"} 格式，用于关联已存在的云文档
+      // 此处导入场景无需传入 extra，保留注释供后续核实
+      // formData.append('extra', JSON.stringify({ drive_route_token: 'xxx' }));
 
       const mimeTypes: Record<string, string> = {
         'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -1053,7 +1081,7 @@ export class FeishuApiClient {
       const docToken = await this.pollImportTask(ticket);
       return docToken;
     } catch (error) {
-      console.error('[FeiSync] 导入文件失败:', error);
+      log.error('导入文件失败:', error);
       throw error;
     }
   }
@@ -1184,7 +1212,7 @@ export class FeishuApiClient {
         throw new Error(`移动文件失败: ${data.msg}`);
       }
     } catch (error) {
-      console.error('[FeiSync] 移动文件失败:', error);
+      log.error('移动文件失败:', error);
       throw error;
     }
   }
