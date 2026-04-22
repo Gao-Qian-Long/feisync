@@ -28,6 +28,9 @@ Thumbs.db
 *.log
 npm-debug.log*
 .roo/
+
+# 开发计划文档（不需要上传）
+plans/
 # 临时文件
 *.tmp
 *.temp
