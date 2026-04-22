@@ -559,7 +559,7 @@ export class FeishuAuthManager {
   clearUserToken(): void {
     this.userTokenInfo = null;
     this.oauthState = '';
-    console.log('[FeiSync] 用户授权信息已清除');
+    log.info('用户授权信息已清除');
   }
 
   /**
@@ -580,7 +580,7 @@ export class FeishuAuthManager {
   saveUserTokenToStorage(storage: any): void {
     if (this.userTokenInfo) {
       storage.set('feishuUserToken', JSON.stringify(this.userTokenInfo));
-      console.log('[FeiSync] 用户令牌已保存');
+      log.info('用户令牌已保存');
     }
   }
 
@@ -598,9 +598,9 @@ export class FeishuAuthManager {
           this.userTokenInfo = tokenInfo;
           this._wasUserAuthorized = true;
           const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
-          console.log(`[FeiSync] 用户令牌已从存储恢复（${status}）`);
+          log.info(`用户令牌已从存储恢复（${status}）`);
         } else {
-          console.log('[FeiSync] 存储的令牌无 refresh_token，无法自动续期');
+          log.debug('存储的令牌无 refresh_token，无法自动续期');
         }
       } catch (error) {
         log.error('解析保存的用户令牌失败:', error);
@@ -617,7 +617,7 @@ export class FeishuAuthManager {
       this.userTokenInfo = tokenInfo;
       this._wasUserAuthorized = true;
       const status = tokenInfo.expiresAt > Date.now() ? '有效' : '已过期，将自动刷新';
-      console.log(`[FeiSync] 用户令牌已恢复（${status}）`);
+      log.info(`用户令牌已恢复（${status}）`);
     } else {
       log.debug('恢复的令牌无 refresh_token，无法自动续期');
     }

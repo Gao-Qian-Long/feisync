@@ -176,6 +176,9 @@ export class SyncEngine {
 
     log.info(`开始多文件夹同步，共 ${enabledConfigs.length} 个映射`);
 
+    // 用于标记是否已显示关键错误提示（避免重复显示 Notice）
+    let criticalErrorShown = false;
+
     // 3. 遍历每个映射执行同步
     for (const folderConfig of enabledConfigs) {
       log.info(`--- 同步映射: "${folderConfig.localPath}" → remote="${folderConfig.remoteFolderToken || '(auto)'}" ---`);
@@ -188,27 +191,43 @@ export class SyncEngine {
         result.failedCount += folderResult.failedCount;
         result.deletedCount += folderResult.deletedCount;
         result.errors.push(...folderResult.errors);
+
+        // 如果映射同步失败且包含关键错误（如 IP 白名单），立即中止
+        if (!folderResult.success && folderResult.errors.some(e => e.includes('IP 白名单') || e.includes('99991401'))) {
+          log.warn(`检测到关键错误，中止后续同步`);
+          result.success = false;
+          criticalErrorShown = true;
+          break;
+        }
       } catch (error) {
         const errMsg = (error as Error).message || '';
         result.errors.push(`映射 "${folderConfig.localPath}" 同步失败: ${errMsg}`);
         log.error(`映射 "${folderConfig.localPath}" 同步失败:`, error);
+
+        // 关键错误立即中止
+        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting') || errMsg.includes('IP 白名单')) {
+          result.success = false;
+          criticalErrorShown = true;
+          break;
+        }
       }
     }
 
-    // 4. 汇总结果
-    result.success = result.failedCount === 0;
+    // 4. 汇总结果（只有成功或非关键失败才显示"同步完成"）
+    result.success = result.failedCount === 0 && !result.errors.some(e => e.includes('IP 白名单') || e.includes('99991401'));
 
-    if (result.failedCount === 0) {
+    // 如果关键错误已在子方法中显示过提示，这里不再重复显示
+    if (!result.success && !criticalErrorShown) {
+      const msg = `同步中止：${result.errors[result.errors.length - 1] || '发生错误'}`;
+      new Notice(msg, 8000);
+      this.addLog('error', '', msg);
+    } else if (result.success) {
       const parts: string[] = [];
       if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
       if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
       if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
       if (parts.length === 0) parts.push('无变化');
       const msg = `同步完成！${parts.join('，')}`;
-      new Notice(msg);
-      this.addLog('info', '', msg);
-    } else {
-      const msg = `同步完成：上传 ${result.uploadedCount}，跳过 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
       new Notice(msg);
       this.addLog('info', '', msg);
     }
@@ -276,7 +295,15 @@ export class SyncEngine {
 
     // 7. 汇总结果
     result.success = result.failedCount === 0;
-    this.reportResult(result);
+
+    // 如果有 IP 白名单等关键错误，不显示"同步完成"
+    if (!result.success) {
+      const msg = `同步中止：${result.errors[result.errors.length - 1] || '发生错误'}`;
+      new Notice(msg, 8000);
+      this.addLog('error', '', msg);
+    } else {
+      this.reportResult(result);
+    }
 
     return result;
   }
@@ -350,7 +377,12 @@ export class SyncEngine {
       result.success = false;
     }
 
-    // 6. 更新映射的上次同步时间
+    // 6. 如果发生关键错误，不更新同步时间，表示同步未完成
+    if (!result.success) {
+      return result;
+    }
+
+    // 7. 更新映射的上次同步时间
     folderConfig.lastSyncTime = Date.now();
     folderConfig.lastSyncFileCount = localFiles.length;
 

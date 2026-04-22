@@ -317,6 +317,14 @@ export class FileWatcher {
   }
 
   /**
+   * 重新加载忽略过滤器（供外部调用）
+   */
+  async reloadIgnoreFilter(): Promise<void> {
+    this.ignoreFilter = await loadIgnoreFilter(this.vault);
+    log.info(`忽略过滤器已重新加载，${this.ignoreFilter.ruleCount} 条规则`);
+  }
+
+  /**
    * 检查是否正在监听
    */
   isWatching(): boolean {

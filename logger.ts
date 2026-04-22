@@ -1,6 +1,6 @@
 /**
  * 统一日志模块
- * 借鉴 Obsidian 日志格式：简洁、层级清晰
+ * 统一使用 Obsidian 风格：简洁的 [模块] 消息 格式
  */
 
 export enum LogLevel {
@@ -31,64 +31,56 @@ export function getLogLevel(): LogLevel {
 
 /**
  * DEBUG 级别 - 详细调试信息
- * 格式: [DEBUG] message
+ * 格式: [模块] message
  */
 export function debug(message: string, ...data: any[]): void {
 	if (currentLogLevel <= LogLevel.DEBUG) {
-		const prefix = '%c[DEBUG]';
-		const style = 'color: #888; font-weight: normal;';
 		if (data.length > 0) {
-			console.log(prefix, style, message, ...data);
+			console.log(message, ...data);
 		} else {
-			console.log(prefix, style, message);
+			console.log(message);
 		}
 	}
 }
 
 /**
  * INFO 级别 - 常规操作信息
- * 格式: [INFO] message
+ * 格式: [模块] message
  */
 export function info(message: string, ...data: any[]): void {
 	if (currentLogLevel <= LogLevel.INFO) {
-		const prefix = '%c[INFO]';
-		const style = 'color: #3b82f6; font-weight: bold;';
 		if (data.length > 0) {
-			console.log(prefix, style, message, ...data);
+			console.log(message, ...data);
 		} else {
-			console.log(prefix, style, message);
+			console.log(message);
 		}
 	}
 }
 
 /**
  * WARN 级别 - 警告信息
- * 格式: [WARN] message
+ * 格式: [模块] message
  */
 export function warn(message: string, ...data: any[]): void {
 	if (currentLogLevel <= LogLevel.WARN) {
-		const prefix = '%c[WARN]';
-		const style = 'color: #f59e0b; font-weight: bold;';
 		if (data.length > 0) {
-			console.warn(prefix, style, message, ...data);
+			console.warn(message, ...data);
 		} else {
-			console.warn(prefix, style, message);
+			console.warn(message);
 		}
 	}
 }
 
 /**
  * ERROR 级别 - 错误信息
- * 格式: [ERROR] message
+ * 格式: [模块] message
  */
 export function error(message: string, ...data: any[]): void {
 	if (currentLogLevel <= LogLevel.ERROR) {
-		const prefix = '%c[ERROR]';
-		const style = 'color: #ef4444; font-weight: bold;';
 		if (data.length > 0) {
-			console.error(prefix, style, message, ...data);
+			console.error(message, ...data);
 		} else {
-			console.error(prefix, style, message);
+			console.error(message);
 		}
 	}
 }
@@ -98,10 +90,11 @@ export function error(message: string, ...data: any[]): void {
  * 用法: const log = createLogger('SyncEngine');
  */
 export function createLogger(module: string) {
+	const prefix = `[${module}]`;
 	return {
-		debug: (message: string, ...data: any[]) => debug(`[${module}] ${message}`, ...data),
-		info: (message: string, ...data: any[]) => info(`[${module}] ${message}`, ...data),
-		warn: (message: string, ...data: any[]) => warn(`[${module}] ${message}`, ...data),
-		error: (message: string, ...data: any[]) => error(`[${module}] ${message}`, ...data),
+		debug: (message: string, ...data: any[]) => debug(`${prefix} ${message}`, ...data),
+		info: (message: string, ...data: any[]) => info(`${prefix} ${message}`, ...data),
+		warn: (message: string, ...data: any[]) => warn(`${prefix} ${message}`, ...data),
+		error: (message: string, ...data: any[]) => error(`${prefix} ${message}`, ...data),
 	};
 }

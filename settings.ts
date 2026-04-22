@@ -1,11 +1,8 @@
 import FeiSyncPlugin from './main';
-import { App, PluginSettingTab, Setting, Notice, TextComponent, AbstractInputSuggest, TFolder, Modal } from 'obsidian';
-import { SyncFolderConfig, createSyncFolderConfig, validateSyncFolderConfig, getEnabledConfigs } from './syncFolderConfig';
+import { App, PluginSettingTab, Setting, Notice, TextComponent, AbstractInputSuggest, TFolder, TFile, Modal } from 'obsidian';
+import { SyncFolderConfig, createSyncFolderConfig, validateSyncFolderConfig } from './syncFolderConfig';
 import { FeishuFolderBrowserModal } from './feishuFolderBrowser';
-import { getDefaultIgnoreContent, FEISYNC_IGNORE_FILE, loadIgnoreFilter } from './ignoreFilter';
-import { createLogger } from './logger';
-
-const log = createLogger('Settings');
+import { getDefaultIgnoreContent, FEISYNC_IGNORE_FILE } from './ignoreFilter';
 
 /**
  * 同步日志查看弹窗
@@ -116,7 +113,8 @@ class AddFolderMappingModal extends Modal {
           .onClick(() => {
             new FolderSelectModal(this.app, (selectedPath: string) => {
               this.localPath = selectedPath;
-              this.display();
+              this.close();
+              this.open();
             }).open();
           });
       });
@@ -132,7 +130,8 @@ class AddFolderMappingModal extends Modal {
           .setValue(this.mode)
           .onChange((value: string) => {
             this.mode = value as 'auto' | 'custom';
-            this.display();
+            this.close();
+            this.open();
           });
       });
 
@@ -164,7 +163,8 @@ class AddFolderMappingModal extends Modal {
                   (folderToken: string, folderName: string) => {
                     this.remoteFolderToken = folderToken;
                     this.mode = 'custom';
-                    this.display();
+                    this.close();
+                    this.open();
                     new Notice(`已选择飞书文件夹: ${folderName}`);
                   },
                   rootToken
@@ -378,6 +378,9 @@ class FolderSelectModal extends Modal {
   }
 }
 
+// 统一的提示文字样式
+const HINT_STYLE = 'font-size: 12px; color: var(--text-muted);';
+
 // 设置选项卡类
 export class FeiSyncSettingTab extends PluginSettingTab {
   plugin: FeiSyncPlugin;
@@ -392,429 +395,109 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    containerEl.createEl('h2', { text: 'FeiSync 设置' });
+    containerEl.createEl('h2', { text: 'FeiSync 设置' }).style.fontSize = '20px';
 
-    // ==================== 凭证配置 ====================
-    containerEl.createEl('h3', { text: '飞书应用凭证' });
-
-    new Setting(containerEl)
-      .setName('飞书 App ID')
-      .setDesc('在飞书开放平台创建应用后获得的 App ID')
-      .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
-        text.setPlaceholder('cli_xxxxxxxx')
-          .setValue(this.plugin.settings.appId)
-          .onChange(async (value: string) => {
-            this.plugin.settings.appId = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('飞书 App Secret')
-      .setDesc('对应的 App Secret，请妥善保管')
-      .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
-        text.inputEl.type = 'password';
-        text.setPlaceholder('xxxxxxxxxxxxxxxx')
-          .setValue(this.plugin.settings.appSecret)
-          .onChange(async (value: string) => {
-            this.plugin.settings.appSecret = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    // ==================== 代理设置 ====================
-    containerEl.createEl('h3', { text: '网络设置' });
-
-    new Setting(containerEl)
-      .setName('使用代理服务器')
-      .setDesc('启用后可通过代理服务器访问飞书 API，适用于网络受限环境')
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.enableProxy)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.enableProxy = value;
-            await this.plugin.saveSettings();
-            this.display();
-          });
-      });
-
-    if (this.plugin.settings.enableProxy) {
-      const proxySetting = new Setting(containerEl)
-        .setName('代理服务器地址')
-        .setDesc('代理服务器地址，例如：http://your-proxy.com:8080')
-        .addText((text: TextComponent) => {
-          text.inputEl.style.width = '100%';
-          text.setPlaceholder('http://your-proxy.com:8080')
-            .setValue(this.plugin.settings.proxyUrl)
-            .onChange(async (value: string) => {
-              this.plugin.settings.proxyUrl = value.trim();
-              await this.plugin.saveSettings();
-            });
-        });
-      proxySetting.controlEl.style.flexWrap = 'wrap';
-      proxySetting.controlEl.style.width = '100%';
-
-      new Setting(containerEl)
-        .setName('代理连接测试')
-        .setDesc('测试代理服务器是否可达以及飞书 API 是否连通')
-        .addButton((button) => {
-          button.setButtonText('测试连接')
-            .onClick(async () => {
-              button.setDisabled(true);
-              button.setButtonText('测试中...');
-              const proxyUrl = this.plugin.settings.proxyUrl;
-              if (proxyUrl) {
-                const r1 = await this.plugin.testStep('local-to-proxy');
-                if (!r1.success) {
-                  new Notice(`✗ ${r1.message}`);
-                } else {
-                  const r2 = await this.plugin.testStep('proxy-to-feishu');
-                  new Notice(r2.success ? `✓ ${r2.message}` : `✗ 代理→飞书: ${r2.message}`);
-                }
-              } else {
-                const result = await this.plugin.testStep('direct-to-feishu');
-                new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
-              }
-              button.setDisabled(false);
-              button.setButtonText('测试连接');
-            });
-        });
-    }
-
-    // ==================== 文件夹映射 ====================
-    containerEl.createEl('h3', { text: '文件夹映射' });
-
-    // 飞书同步根目录 Token
-    new Setting(containerEl)
-      .setName('飞书同步根目录 Token（可选）')
-      .setDesc('所有自动映射的文件夹将在此目录下创建。留空则自动创建 "ObsidianSync" 文件夹。')
-      .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
-        text.setPlaceholder('fldcnxxxxxxxx')
-          .setValue(this.plugin.settings.feishuRootFolderToken)
-          .onChange(async (value: string) => {
-            this.plugin.settings.feishuRootFolderToken = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    // 浏览飞书根目录按钮
-    if (this.plugin.apiClient) {
-      new Setting(containerEl)
-        .setName('浏览飞书根目录')
-        .setDesc('从飞书云空间中选择同步根目录')
-        .addButton((button) => {
-          button.setButtonText('浏览飞书目录...')
-            .onClick(() => {
-              new FeishuFolderBrowserModal(
-                this.app,
-                this.plugin.apiClient!,
-                (folderToken: string, folderName: string) => {
-                  this.plugin.settings.feishuRootFolderToken = folderToken;
-                  this.plugin.saveSettings();
-                  this.display();
-                  new Notice(`已选择根目录: ${folderName}`);
-                },
-                ''
-              ).open();
-            });
-        });
-    }
-
-    // 文件夹映射列表
-    const syncFolders = this.plugin.settings.syncFolders || [];
-
-    if (syncFolders.length > 0) {
-      const listContainer = containerEl.createDiv({ cls: 'feisync-folder-mapping-list' });
-      listContainer.style.marginBottom = '12px';
-
-      for (let i = 0; i < syncFolders.length; i++) {
-        const config = syncFolders[i];
-        const itemContainer = listContainer.createDiv({ cls: 'feisync-folder-mapping-item' });
-        itemContainer.style.display = 'flex';
-        itemContainer.style.alignItems = 'center';
-        itemContainer.style.padding = '8px 0';
-        itemContainer.style.borderBottom = '1px solid var(--background-modifier-border)';
-        itemContainer.style.gap = '8px';
-
-        // 启用开关
-        const toggleEl = itemContainer.createEl('input', { type: 'checkbox' });
-        toggleEl.checked = config.enabled;
-        toggleEl.style.cursor = 'pointer';
-        toggleEl.addEventListener('change', async () => {
-          config.enabled = toggleEl.checked;
-          await this.plugin.saveSettings();
-        });
-
-        // 信息区
-        const infoEl = itemContainer.createDiv();
-        infoEl.style.flex = '1';
-
-        const pathEl = infoEl.createDiv({ text: config.localPath });
-        pathEl.style.fontWeight = 'bold';
-
-        const modeText = config.mode === 'auto'
-          ? '→ 自动创建同名文件夹'
-          : `→ 自定义 (${config.remoteFolderToken.substring(0, 12)}...)`;
-        const statusText = config.lastSyncTime > 0
-          ? ` | 上次同步: ${new Date(config.lastSyncTime).toLocaleString()}`
-          : ' | 未同步';
-        const modeEl = infoEl.createDiv({ text: modeText + statusText });
-        modeEl.style.fontSize = '12px';
-        modeEl.style.color = 'var(--text-muted)';
-
-        // 删除按钮
-        const deleteBtn = itemContainer.createEl('button', { text: '删除' });
-        deleteBtn.style.fontSize = '12px';
-        deleteBtn.addEventListener('click', async () => {
-          this.plugin.settings.syncFolders.splice(i, 1);
-          await this.plugin.saveSettings();
-          this.display();
-        });
-      }
-    } else {
-      containerEl.createEl('p', {
-        text: '尚未配置文件夹映射。点击下方按钮添加。',
-        cls: 'feisync-hint'
-      });
-
-      // 旧版配置迁移提示
-      if (this.plugin.settings.localFolderPath) {
-        new Setting(containerEl)
-          .setName('迁移旧配置')
-          .setDesc(`检测到旧版单文件夹配置 "${this.plugin.settings.localFolderPath}"，点击迁移为新的多文件夹映射`)
-          .addButton((button) => {
-            button.setButtonText('迁移')
-              .setCta()
-              .onClick(async () => {
-                const { migrateFromLegacyConfig } = await import('./syncFolderConfig');
-                const newConfigs = migrateFromLegacyConfig(
-                  this.plugin.settings.localFolderPath,
-                  this.plugin.settings.feishuRootFolderToken
-                );
-                this.plugin.settings.syncFolders = newConfigs;
-                // 保留旧字段值不删除，但标记已迁移
-                await this.plugin.saveSettings();
-                new Notice('旧配置已迁移');
-                this.display();
-              });
-          });
-      }
-    }
-
-    // 添加映射按钮
-    new Setting(containerEl)
-      .setName('添加文件夹映射')
-      .setDesc('选择本地文件夹并配置如何映射到飞书云空间')
-      .addButton((button) => {
-        button.setButtonText('+ 添加映射')
-          .setCta()
-          .onClick(() => {
-            new AddFolderMappingModal(this.app, this.plugin, async (config: SyncFolderConfig) => {
-              // 检查是否已有相同路径的映射
-              const existing = this.plugin.settings.syncFolders.find(c => c.localPath === config.localPath);
-              if (existing) {
-                new Notice(`文件夹 "${config.localPath}" 已存在映射`);
-                return;
-              }
-              this.plugin.settings.syncFolders.push(config);
-              await this.plugin.saveSettings();
-              this.display();
-              new Notice(`已添加映射: ${config.localPath}`);
-            }).open();
-          });
-      });
-
-    // ==================== 忽略规则（配置文件方式）====================
-    containerEl.createEl('h3', { text: '同步忽略规则' });
-
-    const ignoreDesc = `创建 ${FEISYNC_IGNORE_FILE} 文件可排除特定文件/文件夹不同步。`;
-    containerEl.createEl('p', { text: ignoreDesc, cls: 'feisync-hint' });
-
-    // 语法说明（紧凑格式）
-    const syntaxHint = containerEl.createEl('div', {
-      cls: 'feisync-hint',
-      attr: { style: 'font-size: 11px; color: var(--text-muted); line-height: 1.5;' }
-    });
-    syntaxHint.innerHTML = `
-      语法：<code>attachments/</code> 忽略目录 &nbsp;
-      <code>*.tmp</code> 忽略扩展名 &nbsp;
-      <code>**/.bak</code> 任意位置 &nbsp;
-      <code>!file.md</code> 取消忽略
-    `;
-
-    // 检查忽略规则文件是否存在
-    const ignoreFile = this.app.vault.getAbstractFileByPath(FEISYNC_IGNORE_FILE);
-    if (!ignoreFile) {
-      new Setting(containerEl)
-        .setName('创建忽略规则文件')
-        .setDesc('创建包含常见忽略项的 Markdown 配置文件')
-        .addButton((button) => {
-          button.setButtonText('创建忽略规则文件')
-            .onClick(async () => {
-              try {
-                const defaultContent = getDefaultIgnoreContent();
-                await this.app.vault.create(FEISYNC_IGNORE_FILE, defaultContent);
-                new Notice(`${FEISYNC_IGNORE_FILE} 已创建`);
-                this.display();
-              } catch (err) {
-                new Notice('创建失败: ' + (err as Error).message);
-              }
-            });
-        });
-    } else {
-      new Setting(containerEl)
-        .setName('编辑忽略规则文件')
-        .setDesc(`${FEISYNC_IGNORE_FILE} 已创建，可在 Obsidian 中直接编辑`)
-        .addButton((button) => {
-          button.setButtonText('在编辑器中打开')
-            .onClick(() => {
-              const file = this.app.vault.getAbstractFileByPath(FEISYNC_IGNORE_FILE);
-              if (file) {
-                // @ts-ignore
-                this.app.workspace.openLinkText(FEISYNC_IGNORE_FILE, '');
-              }
-            });
-        })
-        .addButton((button) => {
-          button.setButtonText('重置为默认')
-            .onClick(async () => {
-              try {
-                const defaultContent = getDefaultIgnoreContent();
-                await this.app.vault.modify(ignoreFile as TFile, defaultContent);
-                new Notice('已重置为默认规则');
-                // 重新加载过滤器
-                await this.plugin.syncEngine.reloadIgnoreFilter();
-                this.plugin.fileWatcher?.reloadIgnoreFilter();
-              } catch (err) {
-                new Notice('重置失败: ' + (err as Error).message);
-              }
-            });
-        });
-    }
-
-    // ==================== 同步选项 ====================
-    containerEl.createEl('hr');
-    containerEl.createEl('h3', { text: '同步选项' });
-
-    new Setting(containerEl)
-      .setName('自动同步')
-      .setDesc('监听本地文件变化并自动上传到飞书')
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.autoSyncOnChange)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.autoSyncOnChange = value;
-            await this.plugin.saveSettings();
-            await this.plugin.toggleFileWatcher(value);
-            this.display();
-          });
-      });
-
-    if (this.plugin.settings.autoSyncOnChange) {
-      new Setting(containerEl)
-        .setName('同步间隔（分钟）')
-        .setDesc('两次自动同步的最小时间间隔')
-        .addText((text: TextComponent) => {
-          text.inputEl.style.width = '80px';
-          text.setPlaceholder('5')
-            .setValue(this.plugin.settings.syncInterval.toString())
-            .onChange(async (value: string) => {
-              const num = parseInt(value, 10);
-              if (!isNaN(num) && num > 0 && num <= 1440) {
-                this.plugin.settings.syncInterval = num;
-                await this.plugin.saveSettings();
-              }
-            });
-        });
-    }
-
-    new Setting(containerEl)
-      .setName('同步删除')
-      .setDesc('本地文件删除时，同时删除飞书云端的对应文件')
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.syncOnDelete)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.syncOnDelete = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('定时同步')
-      .setDesc('按固定时间间隔自动执行同步')
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.enableScheduledSync)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.enableScheduledSync = value;
-            await this.plugin.saveSettings();
-            this.plugin.toggleScheduledSync(value);
-            this.display();
-          });
-      });
-
-    if (this.plugin.settings.enableScheduledSync) {
-      new Setting(containerEl)
-        .setName('定时同步间隔（分钟）')
-        .setDesc('定时同步的执行间隔')
-        .addText((text: TextComponent) => {
-          text.inputEl.style.width = '80px';
-          text.setPlaceholder('30')
-            .setValue(this.plugin.settings.scheduledSyncInterval.toString())
-            .onChange(async (value: string) => {
-              const num = parseInt(value, 10);
-              if (!isNaN(num) && num > 0 && num <= 1440) {
-                this.plugin.settings.scheduledSyncInterval = num;
-                await this.plugin.saveSettings();
-                if (this.plugin.settings.enableScheduledSync) {
-                  this.plugin.toggleScheduledSync(false);
-                  this.plugin.toggleScheduledSync(true);
-                }
-              }
-            });
-        });
-    }
-
-    // ==================== 高级设置 ====================
-    containerEl.createEl('hr');
-    containerEl.createEl('h3', { text: '高级设置' });
-
-    new Setting(containerEl)
-      .setName('最大并发上传数')
-      .setDesc('同时上传的最大文件数（1-10）')
-      .addSlider((slider) => {
-        slider.setLimits(1, 10, 1)
-          .setValue(this.plugin.settings.maxConcurrentUploads)
-          .setDynamicTooltip()
-          .onChange(async (value: number) => {
-            this.plugin.settings.maxConcurrentUploads = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('API 请求重试次数')
-      .setDesc('网络请求失败时的最大重试次数')
-      .addSlider((slider) => {
-        slider.setLimits(0, 5, 1)
-          .setValue(this.plugin.settings.maxRetryAttempts)
-          .setDynamicTooltip()
-          .onChange(async (value: number) => {
-            this.plugin.settings.maxRetryAttempts = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    // ==================== 用户授权 ====================
-    containerEl.createEl('hr');
-    containerEl.createEl('h3', { text: '飞书用户授权' });
+    // ==================== 常用操作（最优先）====================
+    containerEl.createEl('h3', { text: '常用操作' });
 
     const isUserAuthorized = this.plugin.authManager?.isUserAuthorized() ?? false;
+    const hasMappings = (this.plugin.settings.syncFolders || []).filter(c => c.enabled).length > 0;
+
+    // 授权状态 + 同步按钮 一行
+    const actionRow = containerEl.createDiv();
+    actionRow.style.display = 'flex';
+    actionRow.style.gap = '16px';
+    actionRow.style.alignItems = 'center';
+    actionRow.style.marginBottom = '12px';
+    actionRow.style.flexWrap = 'wrap';
+
+    // 授权状态指示
+    const authStatus = actionRow.createSpan({
+      text: isUserAuthorized ? '✓ 已授权' : '✗ 未授权',
+      attr: { style: `font-size: 13px; color: ${isUserAuthorized ? '#4caf50' : '#f44336'};` }
+    });
+    authStatus.title = isUserAuthorized ? '已绑定飞书用户，可以访问个人云空间' : '需要完成用户授权才能访问个人云空间';
+
+    // 映射状态
+    const mappingStatus = actionRow.createSpan({
+      text: hasMappings ? `📁 ${hasMappings} 个映射` : '📁 未配置映射',
+      attr: { style: `font-size: 13px; color: ${hasMappings ? 'var(--text-normal)' : 'var(--text-muted)'};` }
+    });
+
+    // 同步按钮
+    const syncBtn = actionRow.createEl('button', { text: '立即同步' });
+    syncBtn.style.backgroundColor = 'var(--interactive-accent)';
+    syncBtn.style.color = 'var(--text-on-accent)';
+    syncBtn.style.border = 'none';
+    syncBtn.style.padding = '6px 16px';
+    syncBtn.style.borderRadius = '4px';
+    syncBtn.style.cursor = 'pointer';
+    syncBtn.style.fontSize = '13px';
+    syncBtn.title = '立即执行一次同步操作';
+    syncBtn.onclick = async () => {
+      if (!isUserAuthorized) {
+        new Notice('请先完成用户授权');
+        return;
+      }
+      if (!hasMappings) {
+        new Notice('请先配置文件夹映射');
+        return;
+      }
+      syncBtn.setAttribute('disabled', 'true');
+      syncBtn.textContent = '同步中...';
+      try {
+        await this.plugin.sync();
+      } catch (e) {
+        new Notice('同步失败');
+      } finally {
+        syncBtn.removeAttribute('disabled');
+        syncBtn.textContent = '立即同步';
+      }
+    };
+
+    // 下载按钮
+    const downloadBtn = actionRow.createEl('button', { text: '从飞书下载' });
+    downloadBtn.style.backgroundColor = 'var(--interactive-accent)';
+    downloadBtn.style.color = 'var(--text-on-accent)';
+    downloadBtn.style.border = 'none';
+    downloadBtn.style.padding = '6px 16px';
+    downloadBtn.style.borderRadius = '4px';
+    downloadBtn.style.cursor = 'pointer';
+    downloadBtn.style.fontSize = '13px';
+    downloadBtn.title = '将飞书云端的文件下载到本地';
+    downloadBtn.onclick = async () => {
+      downloadBtn.setAttribute('disabled', 'true');
+      downloadBtn.textContent = '下载中...';
+      try {
+        await this.plugin.downloadFromFeishu();
+      } catch (e) {
+        new Notice('下载失败');
+      } finally {
+        downloadBtn.removeAttribute('disabled');
+        downloadBtn.textContent = '从飞书下载';
+      }
+    };
+
+    // 查看日志按钮
+    const logBtn = actionRow.createEl('button', { text: '查看日志' });
+    logBtn.style.backgroundColor = 'transparent';
+    logBtn.style.border = '1px solid var(--background-modifier-border)';
+    logBtn.style.padding = '6px 16px';
+    logBtn.style.borderRadius = '4px';
+    logBtn.style.cursor = 'pointer';
+    logBtn.style.fontSize = '13px';
+    logBtn.title = '查看最近的同步操作记录';
+    logBtn.onclick = () => {
+      new SyncLogModal(this.app, this.plugin).open();
+    };
+
+    // ==================== 用户授权 ====================
+    containerEl.createEl('h3', { text: '用户授权' });
 
     if (isUserAuthorized) {
       new Setting(containerEl)
-        .setName('用户已授权')
-        .setDesc('已绑定飞书用户，可以访问个人云空间')
+        .setName('已绑定飞书用户')
+        .setDesc('可以访问个人云空间')
         .addButton((button) => {
           button.setButtonText('解除授权')
             .setWarning()
@@ -825,19 +508,19 @@ export class FeiSyncSettingTab extends PluginSettingTab {
             });
         });
     } else {
-      containerEl.createEl('p', {
-        text: '要访问个人云空间，需要进行用户授权。',
-        cls: 'feisync-hint'
+      const authHint = containerEl.createEl('p', {
+        text: '需要完成用户授权才能访问个人云空间',
+        attr: { style: HINT_STYLE }
       });
 
-      containerEl.createEl('p', {
-        text: '提示：请先在飞书开放平台 → 应用功能 → 网页应用 中，添加回调地址 http://localhost:9527/callback',
-        cls: 'feisync-hint'
+      const callbackHint = containerEl.createEl('p', {
+        text: '提示：在飞书开放平台 → 应用功能 → 网页应用，添加回调地址 http://localhost:9527/callback',
+        attr: { style: HINT_STYLE }
       });
 
       new Setting(containerEl)
-        .setName('进行用户授权')
-        .setDesc('点击后将在浏览器中打开授权页面')
+        .setName('开始授权')
+        .setDesc('点击后在浏览器中完成飞书 OAuth 授权')
         .addButton((button) => {
           let isAuthorizing = false;
 
@@ -896,66 +579,428 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         });
     }
 
-    // ==================== 手动操作 ====================
-    containerEl.createEl('hr');
-    containerEl.createEl('h3', { text: '手动操作' });
+    // ==================== 文件夹映射 ====================
+    containerEl.createEl('h3', { text: '文件夹映射' });
 
-    new Setting(containerEl)
-      .setName('手动同步')
-      .setDesc('立即执行一次同步操作')
-      .addButton((button) => {
-        button.setButtonText('立即同步')
-          .setCta()
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText('同步中...');
-            try {
-              await this.plugin.sync();
-              new Notice('同步完成！');
-            } catch (error) {
-              new Notice('同步失败：' + (error as Error).message);
-            } finally {
-              button.setDisabled(false);
-              button.setButtonText('立即同步');
-            }
-          });
+    // 飞书同步根目录（紧凑显示）
+    if (this.plugin.settings.feishuRootFolderToken) {
+      const rootHint = containerEl.createEl('p', {
+        text: `同步根目录: ${this.plugin.settings.feishuRootFolderToken.substring(0, 16)}...`,
+        attr: { style: HINT_STYLE }
+      });
+      rootHint.title = '所有自动映射的文件夹将在此目录下创建';
+    }
+
+    // 文件夹映射列表
+    const syncFolders = this.plugin.settings.syncFolders || [];
+
+    if (syncFolders.length > 0) {
+      const listContainer = containerEl.createDiv({ cls: 'feisync-folder-mapping-list' });
+      listContainer.style.marginBottom = '8px';
+
+      for (let i = 0; i < syncFolders.length; i++) {
+        const config = syncFolders[i];
+        const itemContainer = listContainer.createDiv({ cls: 'feisync-folder-mapping-item' });
+        itemContainer.style.display = 'flex';
+        itemContainer.style.alignItems = 'center';
+        itemContainer.style.padding = '6px 0';
+        itemContainer.style.borderBottom = '1px solid var(--background-modifier-border)';
+        itemContainer.style.gap = '8px';
+
+        // 启用开关
+        const toggleEl = itemContainer.createEl('input', { type: 'checkbox' });
+        toggleEl.checked = config.enabled;
+        toggleEl.style.cursor = 'pointer';
+        toggleEl.title = config.enabled ? '点击禁用' : '点击启用';
+        toggleEl.addEventListener('change', async () => {
+          config.enabled = toggleEl.checked;
+          await this.plugin.saveSettings();
+        });
+
+        // 信息区
+        const infoEl = itemContainer.createDiv();
+        infoEl.style.flex = '1';
+        infoEl.style.fontSize = '13px';
+
+        const pathEl = infoEl.createEl('strong', { text: config.localPath });
+        pathEl.title = `本地路径: ${config.localPath}`;
+
+        const modeText = config.mode === 'auto' ? '→ 自动创建' : '→ 自定义';
+        const lastSync = config.lastSyncTime > 0 ? ` | ${new Date(config.lastSyncTime).toLocaleDateString()}` : ' | 未同步';
+        const modeEl = infoEl.createEl('span', {
+          text: modeText + lastSync,
+          attr: { style: 'font-size: 11px; color: var(--text-muted);' }
+        });
+
+        // 删除按钮
+        const deleteBtn = itemContainer.createEl('button', { text: '×' });
+        deleteBtn.style.backgroundColor = 'transparent';
+        deleteBtn.style.border = 'none';
+        deleteBtn.style.color = 'var(--text-muted)';
+        deleteBtn.style.fontSize = '16px';
+        deleteBtn.style.cursor = 'pointer';
+        deleteBtn.title = '删除此映射';
+        deleteBtn.addEventListener('click', async () => {
+          this.plugin.settings.syncFolders.splice(i, 1);
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      }
+    } else {
+      const noMappingHint = containerEl.createEl('p', {
+        text: '尚未配置文件夹映射',
+        attr: { style: HINT_STYLE }
       });
 
-    new Setting(containerEl)
-      .setName('从飞书下载')
-      .setDesc('将飞书云端的文件下载到本地')
-      .addButton((button) => {
-        button.setButtonText('从飞书下载')
-          .setCta()
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText('下载中...');
-            try {
-              await this.plugin.downloadFromFeishu();
-              new Notice('下载完成！');
-            } catch (error) {
-              new Notice('下载失败：' + (error as Error).message);
-            } finally {
-              button.setDisabled(false);
-              button.setButtonText('从飞书下载');
-            }
+      // 旧版配置迁移提示
+      if (this.plugin.settings.localFolderPath) {
+        new Setting(containerEl)
+          .setName('检测到旧配置')
+          .setDesc(`"${this.plugin.settings.localFolderPath}" → 点击迁移为多文件夹映射`)
+          .addButton((button) => {
+            button.setButtonText('迁移')
+              .setCta()
+              .onClick(async () => {
+                const { migrateFromLegacyConfig } = await import('./syncFolderConfig');
+                const newConfigs = migrateFromLegacyConfig(
+                  this.plugin.settings.localFolderPath,
+                  this.plugin.settings.feishuRootFolderToken
+                );
+                this.plugin.settings.syncFolders = newConfigs;
+                await this.plugin.saveSettings();
+                new Notice('旧配置已迁移');
+                this.display();
+              });
           });
-      });
+      }
+    }
 
-    // ==================== 日志与记录 ====================
-    containerEl.createEl('h3', { text: '同步日志与记录' });
-
+    // 添加映射按钮
     new Setting(containerEl)
-      .setName('查看同步日志')
-      .setDesc('查看最近的同步操作记录')
+      .setName('添加新映射')
+      .setDesc('选择本地文件夹并配置到飞书的映射关系')
       .addButton((button) => {
-        button.setButtonText('查看日志')
+        button.setButtonText('+ 添加映射')
+          .setCta()
           .onClick(() => {
-            new SyncLogModal(this.app, this.plugin).open();
+            new AddFolderMappingModal(this.app, this.plugin, async (config: SyncFolderConfig) => {
+              const existing = this.plugin.settings.syncFolders.find(c => c.localPath === config.localPath);
+              if (existing) {
+                new Notice(`文件夹 "${config.localPath}" 已存在映射`);
+                return;
+              }
+              this.plugin.settings.syncFolders.push(config);
+              await this.plugin.saveSettings();
+              this.display();
+              new Notice(`已添加映射: ${config.localPath}`);
+            }).open();
           });
-      })
+      });
+
+    // 浏览飞书目录（紧凑）
+    if (this.plugin.apiClient) {
+      new Setting(containerEl)
+        .setName('浏览飞书目录')
+        .setDesc('选择同步根目录（留空则自动创建 ObsidianSync 文件夹）')
+        .addButton((button) => {
+          button.setButtonText('浏览...')
+            .onClick(() => {
+              new FeishuFolderBrowserModal(
+                this.app,
+                this.plugin.apiClient!,
+                (folderToken: string, folderName: string) => {
+                  this.plugin.settings.feishuRootFolderToken = folderToken;
+                  this.plugin.saveSettings();
+                  this.display();
+                  new Notice(`已选择根目录: ${folderName}`);
+                },
+                ''
+              ).open();
+            });
+        });
+    }
+
+    // ==================== 同步选项 ====================
+    containerEl.createEl('h3', { text: '同步选项' });
+
+    new Setting(containerEl)
+      .setName('自动同步')
+      .setDesc('监听本地文件变化，自动上传到飞书')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.autoSyncOnChange)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.autoSyncOnChange = value;
+            await this.plugin.saveSettings();
+            await this.plugin.toggleFileWatcher(value);
+            this.display();
+          });
+      });
+
+    if (this.plugin.settings.autoSyncOnChange) {
+      new Setting(containerEl)
+        .setName('最小同步间隔')
+        .setDesc('单位：分钟')
+        .addText((text: TextComponent) => {
+          text.inputEl.style.width = '60px';
+          text.setValue(this.plugin.settings.syncInterval.toString())
+            .onChange(async (value: string) => {
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num > 0 && num <= 1440) {
+                this.plugin.settings.syncInterval = num;
+                await this.plugin.saveSettings();
+              }
+            });
+        });
+    }
+
+    new Setting(containerEl)
+      .setName('定时同步')
+      .setDesc('按固定间隔自动执行同步')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableScheduledSync)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableScheduledSync = value;
+            await this.plugin.saveSettings();
+            this.plugin.toggleScheduledSync(value);
+            this.display();
+          });
+      });
+
+    if (this.plugin.settings.enableScheduledSync) {
+      new Setting(containerEl)
+        .setName('定时同步间隔')
+        .setDesc('单位：分钟')
+        .addText((text: TextComponent) => {
+          text.inputEl.style.width = '60px';
+          text.setValue(this.plugin.settings.scheduledSyncInterval.toString())
+            .onChange(async (value: string) => {
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num > 0 && num <= 1440) {
+                this.plugin.settings.scheduledSyncInterval = num;
+                await this.plugin.saveSettings();
+                if (this.plugin.settings.enableScheduledSync) {
+                  this.plugin.toggleScheduledSync(false);
+                  this.plugin.toggleScheduledSync(true);
+                }
+              }
+            });
+        });
+    }
+
+    new Setting(containerEl)
+      .setName('同步删除')
+      .setDesc('本地文件删除时，同步删除云端文件')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.syncOnDelete)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.syncOnDelete = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // ==================== 飞书凭证 ====================
+    containerEl.createEl('h3', { text: '飞书凭证' });
+
+    new Setting(containerEl)
+      .setName('App ID')
+      .setDesc('飞书开放平台创建应用后获得的 App ID')
+      .addText((text: TextComponent) => {
+        text.inputEl.style.width = '100%';
+        text.setPlaceholder('cli_xxxxxxxx')
+          .setValue(this.plugin.settings.appId)
+          .onChange(async (value: string) => {
+            this.plugin.settings.appId = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('App Secret')
+      .setDesc('对应的 App Secret')
+      .addText((text: TextComponent) => {
+        text.inputEl.style.width = '100%';
+        text.inputEl.type = 'password';
+        text.setPlaceholder('xxxxxxxxxxxxxxxx')
+          .setValue(this.plugin.settings.appSecret)
+          .onChange(async (value: string) => {
+            this.plugin.settings.appSecret = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    const permissionHint = containerEl.createEl('p', {
+      text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive）',
+      attr: { style: HINT_STYLE }
+    });
+
+    // ==================== 网络设置 ====================
+    containerEl.createEl('h3', { text: '网络设置' });
+
+    new Setting(containerEl)
+      .setName('使用代理')
+      .setDesc('通过代理服务器访问飞书 API')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableProxy)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableProxy = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      });
+
+    if (this.plugin.settings.enableProxy) {
+      new Setting(containerEl)
+        .setName('代理地址')
+        .setDesc('例如：http://proxy.com:8080')
+        .addText((text: TextComponent) => {
+          text.inputEl.style.width = '100%';
+          text.setPlaceholder('http://your-proxy.com:8080')
+            .setValue(this.plugin.settings.proxyUrl)
+            .onChange(async (value: string) => {
+              this.plugin.settings.proxyUrl = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('测试连接')
+        .setDesc('测试代理和飞书 API 连通性')
+        .addButton((button) => {
+          button.setButtonText('测试')
+            .onClick(async () => {
+              button.setDisabled(true);
+              button.setButtonText('测试中...');
+              const proxyUrl = this.plugin.settings.proxyUrl;
+              if (proxyUrl) {
+                const r1 = await this.plugin.testStep('local-to-proxy');
+                if (!r1.success) {
+                  new Notice(`✗ ${r1.message}`);
+                } else {
+                  const r2 = await this.plugin.testStep('proxy-to-feishu');
+                  new Notice(r2.success ? `✓ ${r2.message}` : `✗ 代理→飞书: ${r2.message}`);
+                }
+              } else {
+                const result = await this.plugin.testStep('direct-to-feishu');
+                new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
+              }
+              button.setDisabled(false);
+              button.setButtonText('测试');
+            });
+        });
+    }
+
+    // ==================== 忽略规则 ====================
+    containerEl.createEl('h3', { text: '忽略规则' });
+
+    const ignoreFile = this.app.vault.getAbstractFileByPath(FEISYNC_IGNORE_FILE);
+
+    // 语法说明（紧凑）
+    const syntaxHint = containerEl.createEl('div', {
+      attr: { style: `${HINT_STYLE} line-height: 1.6; margin-bottom: 8px;` }
+    });
+    syntaxHint.innerHTML = `
+      语法：<code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">folder/</code> 忽略目录 &nbsp;
+      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">*.ext</code> 忽略扩展名 &nbsp;
+      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">**/.bak</code> 任意位置 &nbsp;
+      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">!file.md</code> 取消忽略
+    `;
+    syntaxHint.title = '创建 feisync-ignore.md 文件可排除特定文件/文件夹不同步';
+
+    if (!ignoreFile) {
+      new Setting(containerEl)
+        .setName('创建忽略规则文件')
+        .setDesc('生成包含常见忽略项的配置文件')
+        .addButton((button) => {
+          button.setButtonText('创建')
+            .onClick(async () => {
+              try {
+                const defaultContent = getDefaultIgnoreContent();
+                await this.app.vault.create(FEISYNC_IGNORE_FILE, defaultContent);
+                new Notice(`${FEISYNC_IGNORE_FILE} 已创建`);
+                this.display();
+              } catch (err) {
+                new Notice('创建失败: ' + (err as Error).message);
+              }
+            });
+        });
+    } else {
+      new Setting(containerEl)
+        .setName('编辑忽略规则')
+        .setDesc(`${FEISYNC_IGNORE_FILE} 已存在`)
+        .addButton((button) => {
+          button.setButtonText('在编辑器中打开')
+            .onClick(() => {
+              this.app.workspace.openLinkText(FEISYNC_IGNORE_FILE, '');
+            });
+        })
+        .addButton((button) => {
+          button.setButtonText('重置')
+            .onClick(async () => {
+              try {
+                const defaultContent = getDefaultIgnoreContent();
+                await this.app.vault.modify(ignoreFile as TFile, defaultContent);
+                new Notice('已重置为默认规则');
+                await this.plugin.syncEngine?.reloadIgnoreFilter();
+                this.plugin.fileWatcher?.reloadIgnoreFilter();
+              } catch (err) {
+                new Notice('重置失败: ' + (err as Error).message);
+              }
+            });
+        });
+    }
+
+    // ==================== 高级设置 ====================
+    containerEl.createEl('h3', { text: '高级设置' });
+
+    new Setting(containerEl)
+      .setName('并发上传数')
+      .setDesc('同时上传的最大文件数（1-10）')
+      .addSlider((slider) => {
+        slider.setLimits(1, 10, 1)
+          .setValue(this.plugin.settings.maxConcurrentUploads)
+          .setDynamicTooltip()
+          .onChange(async (value: number) => {
+            this.plugin.settings.maxConcurrentUploads = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('API 重试次数')
+      .setDesc('网络请求失败时的最大重试次数')
+      .addSlider((slider) => {
+        slider.setLimits(0, 5, 1)
+          .setValue(this.plugin.settings.maxRetryAttempts)
+          .setDynamicTooltip()
+          .onChange(async (value: number) => {
+            this.plugin.settings.maxRetryAttempts = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // ==================== 数据管理 ====================
+    containerEl.createEl('h3', { text: '数据管理' });
+
+    new Setting(containerEl)
+      .setName('重置同步记录')
+      .setDesc(`清除本地记录（${Object.keys(this.plugin.settings.syncRecords || {}).length} 条）`)
       .addButton((button) => {
-        button.setButtonText('清除日志')
+        button.setButtonText('重置')
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.settings.syncRecords = {};
+            this.plugin.settings.recordsClearedAt = Date.now();
+            await this.plugin.saveSettings();
+            new Notice('同步记录已重置');
+            this.display();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('清除同步日志')
+      .setDesc('清空所有同步日志记录')
+      .addButton((button) => {
+        button.setButtonText('清除')
           .setWarning()
           .onClick(async () => {
             this.plugin.settings.syncLog = [];
@@ -963,27 +1008,5 @@ export class FeiSyncSettingTab extends PluginSettingTab {
             new Notice('同步日志已清除');
           });
       });
-
-    new Setting(containerEl)
-      .setName('重置同步记录')
-      .setDesc('清除本地记录后，首次同步会自动检查云端是否有相同文件（hash 相同则跳过上传）')
-      .addButton((button) => {
-        const recordCount = Object.keys(this.plugin.settings.syncRecords || {}).length;
-        button.setButtonText(`重置记录 (${recordCount} 条)`)
-          .setWarning()
-          .onClick(async () => {
-            this.plugin.settings.syncRecords = {};
-            this.plugin.settings.recordsClearedAt = Date.now();
-            await this.plugin.saveSettings();
-            new Notice(`同步记录已重置，将检查云端已有文件`);
-            this.display();
-          });
-      });
-
-    // 提示
-    containerEl.createEl('p', {
-      text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive）。',
-      cls: 'feisync-hint'
-    });
   }
 }
