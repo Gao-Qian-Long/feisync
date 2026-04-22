@@ -2,9 +2,11 @@
 node_modules/
 
 # TypeScript 编译输出
-*.js
 *.js.map
+
+# 保留必要的 JS 文件（esbuild 配置和插件入口）
 !esbuild.config.js
+!main.js
 
 # 包锁文件
 package-lock.json
