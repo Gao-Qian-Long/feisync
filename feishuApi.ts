@@ -113,6 +113,8 @@ export class FeishuApiClient {
   private proxyUrl: string; // 代理服务器地址，留空则直连
   private rateLimiter: RateLimiter;
   private maxRetryAttempts: number;
+  /** 文件夹路径锁：防止并发 ensureFolderPath 创建重复文件夹 */
+  private folderLocks: Map<string, Promise<string>> = new Map();
 
   constructor(authManager: FeishuAuthManager, proxyUrl: string = '', maxRetries: number = 3) {
     this.authManager = authManager;
@@ -315,12 +317,31 @@ export class FeishuApiClient {
 
   /**
    * 确保目标文件夹存在，如果不存在则创建
+   * 使用锁机制防止并发调用创建重复文件夹
    */
   async ensureFolderPath(folderPath: string, rootFolderToken?: string): Promise<string> {
     if (!folderPath || folderPath.trim() === '') {
       return rootFolderToken || '';
     }
 
+    // 使用锁机制：同一个 folderPath+rootFolderToken 只允许一个并发操作
+    const lockKey = `${rootFolderToken || ''}/${folderPath}`;
+    const existingLock = this.folderLocks.get(lockKey);
+    if (existingLock) {
+      return existingLock;
+    }
+
+    const lockPromise = this._doEnsureFolderPath(folderPath, rootFolderToken);
+    this.folderLocks.set(lockKey, lockPromise);
+
+    try {
+      return await lockPromise;
+    } finally {
+      this.folderLocks.delete(lockKey);
+    }
+  }
+
+  private async _doEnsureFolderPath(folderPath: string, rootFolderToken?: string): Promise<string> {
     const parts = folderPath.split('/').filter(p => p.trim() !== '');
     let currentToken = rootFolderToken || '';
 
@@ -333,8 +354,26 @@ export class FeishuApiClient {
 
   /**
    * 在父文件夹下查找或创建子文件夹
+   * 使用锁机制防止并发创建同名文件夹
    */
   private async findOrCreateFolder(folderName: string, parentToken: string): Promise<string> {
+    const lockKey = `create:${parentToken}/${folderName}`;
+    const existingLock = this.folderLocks.get(lockKey);
+    if (existingLock) {
+      return existingLock;
+    }
+
+    const lockPromise = this._doFindOrCreateFolder(folderName, parentToken);
+    this.folderLocks.set(lockKey, lockPromise);
+
+    try {
+      return await lockPromise;
+    } finally {
+      this.folderLocks.delete(lockKey);
+    }
+  }
+
+  private async _doFindOrCreateFolder(folderName: string, parentToken: string): Promise<string> {
     const existing = await this.findFolderByName(folderName, parentToken);
     if (existing) {
       return existing.token;

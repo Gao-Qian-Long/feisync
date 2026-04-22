@@ -576,7 +576,18 @@ export class SyncEngine {
     }
 
     // 在云端文件列表中查找同名文件
-    const cloudFile = cloudFiles.find(f =>
+    // 注意：cloudFiles 是根文件夹的文件列表，子文件夹中的文件需要单独获取
+    let searchFiles = cloudFiles;
+    if (pathParts.length > 1) {
+      // 文件在子文件夹中，获取子文件夹的文件列表
+      try {
+        searchFiles = await this.apiClient.listFolderContents(parentFolderToken);
+      } catch (error) {
+        log.warn(`获取子文件夹 ${parentFolderToken} 的文件列表失败，当作新文件处理:`, error);
+        searchFiles = [];
+      }
+    }
+    const cloudFile = searchFiles.find(f =>
       (f.name === file.name || f.name === file.name.replace(/\.[^.]+$/, '')) &&
       (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
     );
