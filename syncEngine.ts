@@ -10,7 +10,7 @@ import { Vault, TFile, TFolder } from 'obsidian';
 import FeiSyncPlugin from './main';
 import { FeishuFileMeta } from './feishuApi';
 import { FeishuApiClient } from './feishuApi';
-import { Notice, ProgressBarComponent } from 'obsidian';
+import { Notice } from 'obsidian';
 import { SyncLogEntry } from './settings';
 import { IgnoreFilter, loadIgnoreFilter, FEISYNC_IGNORE_FILE } from './ignoreFilter';
 import { SyncFolderConfig, getEnabledConfigs, createSyncFolderConfig, validateSyncFolderConfig } from './syncFolderConfig';
@@ -692,12 +692,12 @@ export class SyncEngine {
           if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
             log.warn(`重命名 ${oldPath} → ${newPath}：删除旧文件失败（IP 白名单限制）`);
             new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
-            this.addLog('warn', oldPath, `重命名时删除旧云端文件失败（IP 白名单限制）`);
+            this.addLog('error', oldPath, `重命名时删除旧云端文件失败（IP 白名单限制）`);
           } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
             log.debug(`重命名：旧云端文件 ${oldFileName} 已不存在或无法删除，视为删除成功`);
           } else {
             log.warn(`重命名 ${oldPath} → ${newPath}：删除旧云端文件失败，继续重命名流程:`, deleteError);
-            this.addLog('warn', oldPath, `删除旧云端文件失败: ${(deleteError as Error).message}`);
+            this.addLog('error', oldPath, `删除旧云端文件失败: ${(deleteError as Error).message}`);
           }
         }
       }
