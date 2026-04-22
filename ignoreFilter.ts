@@ -12,7 +12,7 @@
  *   - pattern    精确匹配文件或目录名
  */
 
-import { Vault, TFile, TFolder } from 'obsidian';
+import { Vault, TFile } from 'obsidian';
 import { createLogger } from './logger';
 
 const log = createLogger('IgnoreFilter');
@@ -65,6 +65,11 @@ export class IgnoreFilter {
 
 			// 跳过空行
 			if (!line) {
+				continue;
+			}
+
+			// 跳过 HTML/Markdown 注释
+			if (/^<!--/.test(line) || /-->$/.test(line)) {
 				continue;
 			}
 
@@ -376,43 +381,27 @@ export async function loadIgnoreFilter(vault: Vault): Promise<IgnoreFilter> {
 export function getDefaultIgnoreContent(): string {
 	return `# FeiSync 忽略规则
 
-此文件用于配置同步时忽略的文件和文件夹。
-**在 Obsidian 中直接编辑此文件即可生效。**
+在 Obsidian 中直接编辑此文件即可生效。
 
----
+<!-- 语法示例 -->
+<!--
+  attachments/   忽略目录
+  *.tmp           忽略扩展名
+  **/.bak         任意位置
+  !important.md   取消忽略
+-->
 
-## 语法说明
+<!-- 忽略规则（删除注释即可启用） -->
 
-| 语法 | 示例 | 说明 |
-|------|------|------|
-| \`dirname/\` | \`attachments/\` | 忽略整个目录 |
-| \`*.ext\` | \`*.tmp\` | 忽略指定扩展名的文件 |
-| \`**/file\` | \`**/.bak\` | 忽略任意位置的匹配文件 |
-| \`!pattern\` | \`!important.md\` | 取消忽略（例外） |
+<!-- Obsidian 配置 -->
+<!-- .obsidian/ -->
 
----
+<!-- 系统文件 -->
+<!-- .DS_Store -->
+<!-- Thumbs.db -->
 
-## 忽略规则
-
-# Obsidian 配置目录
-.obsidian/
-
-# 系统文件
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# 临时文件
-*.tmp
-*.bak
-~$*
-*.swp
-*.swo
-
-# 回收站
-.trash/
-
-# 工作区配置
-.workspace
+<!-- 临时文件 -->
+<!-- *.tmp -->
+<!-- *.bak -->
 `;
 }

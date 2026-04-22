@@ -217,10 +217,10 @@ export class SyncEngine {
   }
 
   /**
-   * 旧版单文件夹同步（向后兼容）
+   * 旧版单文件夹同步（云端优先模式，向后兼容）
    */
   private async syncLegacy(result: SyncResult): Promise<SyncResult> {
-    const { localFolderPath, feishuRootFolderToken, syncOnDelete } = this.plugin.settings;
+    const { localFolderPath, feishuRootFolderToken } = this.plugin.settings;
 
     // 1. 验证配置
     if (!localFolderPath) {
@@ -240,46 +240,41 @@ export class SyncEngine {
     const localFiles = this.scanLocalFolder(localFolderPath);
     log.info(`扫描到 ${localFiles.length} 个文件（已应用忽略规则）`);
 
-    // 4. 加载同步记录
-    const syncRecords = await this.plugin.loadSyncRecords();
-
-    // 5. 构建本地文件路径集合（用于检测删除）
-    const localFilePaths = new Set(localFiles.map(f => f.path));
-
-    // 6. 处理删除
-    if (syncOnDelete) {
-      await this.handleDeletedFiles(syncRecords, localFilePaths, localFolderPath, result);
+    // 4. 获取云端文件列表
+    let cloudFiles: FeishuFileMeta[] = [];
+    try {
+      cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      log.debug(`云端文件列表获取完成，共 ${cloudFiles.length} 个文件/文件夹`);
+    } catch (error) {
+      const errMsg = (error as Error).message || '';
+      if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+        log.error('飞书应用 IP 白名单限制，无法获取云端文件列表');
+        new Notice('同步中止：飞书应用 IP 白名单限制，请在开放平台添加当前 IP', 10000);
+        result.errors.push('飞书应用 IP 白名单限制，无法执行同步');
+        result.success = false;
+        return result;
+      }
+      log.warn('获取云端文件列表失败，将只上传新文件:', error);
     }
 
-    // 7. 并发上传文件
+    // 5. 处理删除（检测云端有但本地没有的文件，删除云端）
+    if (this.plugin.settings.syncOnDelete && cloudFiles.length > 0) {
+      await this.handleCloudDeletedFiles(localFiles, cloudFiles, localFolderPath, result);
+    }
+
+    // 6. 并发上传文件
     if (localFiles.length === 0 && result.deletedCount === 0) {
       new Notice('同步完成：没有需要同步的文件');
       this.addLog('info', '', '同步完成：没有需要同步的文件');
-      await this.plugin.saveSyncRecords(syncRecords);
       return result;
     }
 
     new Notice(`开始同步 ${localFiles.length} 个文件...`);
     this.addLog('info', '', `开始同步 ${localFiles.length} 个文件`);
 
-    // 预先获取云端文件列表（用于新文件查重）
-    let cloudFiles: FeishuFileMeta[] | undefined;
-    if (localFiles.length > 0) {
-      try {
-        cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
-        log.debug(`预获取云端文件列表完成，共 ${cloudFiles.length} 个文件/文件夹`);
-      } catch (error) {
-        log.warn('预获取云端文件列表失败，将使用逐文件查重:', error);
-        cloudFiles = undefined;
-      }
-    }
+    await this.uploadFiles(localFiles, localFolderPath, targetFolderToken, result, cloudFiles);
 
-    await this.uploadFiles(localFiles, localFolderPath, targetFolderToken, syncRecords, result, undefined, cloudFiles);
-
-    // 8. 保存同步记录
-    await this.plugin.saveSyncRecords(syncRecords);
-
-    // 9. 汇总结果
+    // 7. 汇总结果
     result.success = result.failedCount === 0;
     this.reportResult(result);
 
@@ -287,7 +282,7 @@ export class SyncEngine {
   }
 
   /**
-   * 同步单个文件夹映射
+   * 同步单个文件夹映射（云端优先模式）
    */
   private async syncFolder(folderConfig: SyncFolderConfig): Promise<SyncResult> {
     const result: SyncResult = {
@@ -299,8 +294,6 @@ export class SyncEngine {
       downloadedCount: 0,
       errors: [],
     };
-
-    const { syncOnDelete } = this.plugin.settings;
 
     // 1. 获取飞书目标文件夹
     let targetFolderToken: string;
@@ -316,59 +309,50 @@ export class SyncEngine {
     const localFiles = this.scanLocalFolder(folderConfig.localPath);
     log.info(`映射 "${folderConfig.localPath}": 扫描到 ${localFiles.length} 个文件`);
 
-    // 3. 加载同步记录
-    const syncRecords = await this.plugin.loadSyncRecords();
-
-    // 4. 构建本地文件路径集合（用于检测删除）
-    const localFilePaths = new Set(localFiles.map(f => f.path));
-
-    // 5. 处理删除（只处理属于此映射的记录）
-    if (syncOnDelete) {
-      await this.handleDeletedFiles(syncRecords, localFilePaths, folderConfig.localPath, result, folderConfig.id);
-    }
-
-    // 6. 预先获取云端文件列表（用于新文件查重，避免每个文件单独调用 API）
-    let cloudFiles: FeishuFileMeta[] | undefined;
-    let ipDeniedError: boolean = false;
-    if (localFiles.length > 0) {
-      try {
-        cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
-        log.debug(`预获取云端文件列表完成，共 ${cloudFiles.length} 个文件/文件夹`);
-      } catch (error) {
-        const errMsg = (error as Error).message || '';
-        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-          ipDeniedError = true;
-          log.warn('飞书应用 IP 白名单限制，预获取云端文件列表失败');
-          new Notice('飞书应用 IP 白名单限制，部分功能可能受限', 10000);
-        } else {
-          log.warn('预获取云端文件列表失败，将使用逐文件查重:', error);
-        }
-        cloudFiles = undefined;
+    // 3. 获取云端文件列表
+    let cloudFiles: FeishuFileMeta[] = [];
+    try {
+      cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      log.debug(`云端文件列表获取完成，共 ${cloudFiles.length} 个文件/文件夹`);
+    } catch (error) {
+      const errMsg = (error as Error).message || '';
+      if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+        log.error('飞书应用 IP 白名单限制，无法获取云端文件列表');
+        new Notice('同步中止：飞书应用 IP 白名单限制，请在开放平台添加当前 IP', 10000);
+        result.errors.push('飞书应用 IP 白名单限制，无法执行同步');
+        result.success = false;
+        return result;
       }
+      log.warn('获取云端文件列表失败，将只上传新文件:', error);
     }
 
-    // 如果是 IP 白名单错误，记录到结果中
-    if (ipDeniedError) {
-      result.errors.push('飞书应用 IP 白名单限制，无法执行完整同步');
-      this.addLog('warn', '', 'IP 白名单限制警告');
+    // 4. 处理删除（检测云端有但本地没有的文件，删除云端）
+    if (this.plugin.settings.syncOnDelete && cloudFiles.length > 0) {
+      await this.handleCloudDeletedFiles(localFiles, cloudFiles, folderConfig.localPath, result);
     }
 
-    // 7. 并发上传文件
+    // 5. 并发上传文件
     if (localFiles.length === 0 && result.deletedCount === 0) {
       this.addLog('info', '', `映射 "${folderConfig.localPath}": 没有需要同步的文件`);
       return result;
     }
 
+    log.info(`映射 "${folderConfig.localPath}": 开始上传 ${localFiles.length} 个文件到 ${targetFolderToken.substring(0, 12)}...`);
     new Notice(`同步 "${folderConfig.localPath}": ${localFiles.length} 个文件...`);
 
-    await this.uploadFiles(localFiles, folderConfig.localPath, targetFolderToken, syncRecords, result, folderConfig.id, cloudFiles);
+    try {
+      await this.uploadFiles(localFiles, folderConfig.localPath, targetFolderToken, result, cloudFiles);
+      log.info(`映射 "${folderConfig.localPath}": 上传完成，上传=${result.uploadedCount}，跳过=${result.skippedCount}，失败=${result.failedCount}`);
+    } catch (error) {
+      const errMsg = (error as Error).message || String(error);
+      log.error(`映射 "${folderConfig.localPath}": 上传异常: ${errMsg}`);
+      result.errors.push(`映射 "${folderConfig.localPath}" 上传异常: ${errMsg}`);
+      result.success = false;
+    }
 
-    // 7. 更新映射的上次同步时间
+    // 6. 更新映射的上次同步时间
     folderConfig.lastSyncTime = Date.now();
     folderConfig.lastSyncFileCount = localFiles.length;
-
-    // 8. 保存同步记录
-    await this.plugin.saveSyncRecords(syncRecords);
 
     return result;
   }
@@ -398,77 +382,70 @@ export class SyncEngine {
   }
 
   /**
-   * 处理已删除的文件
+   * 处理云端已删除的文件（本地优先模式）
+   * 遍历云端文件列表，检查本地是否存在，不存在则删除云端文件
    */
-  private async handleDeletedFiles(
-    syncRecords: Record<string, FileSyncRecord>,
-    localFilePaths: Set<string>,
+  private async handleCloudDeletedFiles(
+    localFiles: TFile[],
+    cloudFiles: FeishuFileMeta[],
     localFolderPath: string,
-    result: SyncResult,
-    folderConfigId?: string
+    result: SyncResult
   ): Promise<void> {
-    const recordsToDelete: string[] = [];
-    for (const [filePath, record] of Object.entries(syncRecords)) {
-      // 只处理属于指定映射的记录
-      if (folderConfigId && record.folderConfigId && record.folderConfigId !== folderConfigId) {
+    // 构建本地文件名集合
+    const localFileNames = new Set(localFiles.map(f => f.name));
+
+    for (const cloudFile of cloudFiles) {
+      // 只处理文件，不处理文件夹
+      if (cloudFile.type === 'folder') {
         continue;
       }
-      // 只处理在监控文件夹下的记录
-      if (!filePath.startsWith(localFolderPath + '/') && filePath !== localFolderPath) {
-        continue;
-      }
-      if (!localFilePaths.has(filePath)) {
+
+      // 检查云端文件名是否在本地存在
+      if (!localFileNames.has(cloudFile.name)) {
         try {
-          log.info(`本地文件已删除，同步删除云端: ${filePath}`);
-          await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
-          recordsToDelete.push(filePath);
+          log.info(`云端文件 ${cloudFile.name} 在本地不存在，删除云端`);
+          await this.apiClient.deleteFile(cloudFile.token, cloudFile.type);
           result.deletedCount++;
-          this.addLog('delete', filePath, `云端文件已删除 (token: ${record.cloudToken})`);
+          this.addLog('delete', `${localFolderPath}/${cloudFile.name}`, `云端文件已删除`);
         } catch (error) {
           const errMsg = (error as Error).message || '';
           if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-            const ipMsg = `删除云端文件 ${filePath} 失败：飞书应用 IP 白名单限制`;
+            const ipMsg = `删除云端文件 ${cloudFile.name} 失败：飞书应用 IP 白名单限制`;
             result.errors.push(ipMsg);
-            this.addLog('error', filePath, ipMsg);
+            this.addLog('error', cloudFile.name, ipMsg);
             log.warn(ipMsg);
             new Notice('飞书应用 IP 白名单限制，无法删除云端文件', 8000);
-            recordsToDelete.push(filePath);
           } else {
-            const msg = `删除云端文件 ${filePath} 失败: ${errMsg}`;
+            const msg = `删除云端文件 ${cloudFile.name} 失败: ${errMsg}`;
             result.errors.push(msg);
-            this.addLog('error', filePath, msg);
+            this.addLog('error', cloudFile.name, msg);
             log.warn(msg);
           }
         }
       }
     }
-    // 从同步记录中移除已删除的文件
-    for (const key of recordsToDelete) {
-      delete syncRecords[key];
-    }
   }
 
   /**
-   * 并发上传文件
-   * @param cloudFiles 可选的预获取云端文件列表（用于新文件查重，避免每个文件单独调用 API）
+   * 并发上传文件（云端优先模式）
+   * @param cloudFiles 云端文件列表（必须提供）
    */
   private async uploadFiles(
     localFiles: TFile[],
     localFolderPath: string,
     targetFolderToken: string,
-    syncRecords: Record<string, FileSyncRecord>,
     result: SyncResult,
-    folderConfigId?: string,
-    cloudFiles?: FeishuFileMeta[]
+    cloudFiles: FeishuFileMeta[]
   ): Promise<void> {
     const pool = new ConcurrencyPool(this.plugin.settings.maxConcurrentUploads);
     let authError: Error | null = null;
+    let ipDeniedError = false;
 
     const uploadPromises = localFiles.map(file =>
       pool.run(async () => {
-        if (authError) return;
+        if (authError || ipDeniedError) return;
         try {
-          const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, syncRecords, folderConfigId, cloudFiles);
+          const uploaded = await this.syncFile(file, localFolderPath, targetFolderToken, cloudFiles);
           if (uploaded) {
             result.uploadedCount++;
           } else {
@@ -481,6 +458,14 @@ export class SyncEngine {
             result.failedCount++;
             result.errors.push(`授权已失效，同步中止: ${errMsg}`);
             this.addLog('error', file.path, errMsg);
+            return;
+          }
+          if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+            ipDeniedError = true;
+            result.failedCount++;
+            result.errors.push(`飞书应用 IP 白名单限制，同步中止`);
+            this.addLog('error', file.path, 'IP 白名单限制');
+            new Notice('同步中止：飞书应用 IP 白名单限制', 8000);
             return;
           }
           result.failedCount++;
@@ -499,20 +484,23 @@ export class SyncEngine {
       new Notice('同步失败：用户授权已失效，请重新授权', 8000);
       this.addLog('error', '', '同步因授权失效而中止');
     }
+    if (ipDeniedError) {
+      result.success = false;
+      this.addLog('error', '', '同步因 IP 白名单限制而中止');
+    }
   }
 
   /**
-   * 同步单个文件（增量判断）
-   * @param cloudFiles 可选的预获取云端文件列表（用于新文件查重）
+   * 同步单个文件（云端优先模式）
+   * 直接在云端文件列表中查找同名文件，比较哈希决定是否上传
+   * @param cloudFiles 云端文件列表（必须提供）
    * @returns true 表示文件已上传，false 表示文件被跳过（未变化）
    */
   private async syncFile(
     file: TFile,
     localFolderPath: string,
     targetFolderToken: string,
-    syncRecords: Record<string, FileSyncRecord>,
-    folderConfigId?: string,
-    cloudFiles?: FeishuFileMeta[]
+    cloudFiles: FeishuFileMeta[]
   ): Promise<boolean> {
     // 使用白名单模式判断二进制文件
     const ext = file.extension.toLowerCase();
@@ -536,9 +524,6 @@ export class SyncEngine {
     const currentHash = await computeHash(content);
 
     // 计算相对于监控文件夹的路径，确定目标文件夹
-    // file.path 格式如 "folder/sub/file.md"，pathParts = ["folder", "sub", "file.md"]
-    // - pathParts.length === 1：文件直接在根目录，不需要创建子文件夹
-    // - 否则：pathParts.slice(1, -1) 取中间部分作为子路径（如 "sub"），确保路径存在
     const relativePath = file.path;
     const pathParts = relativePath.split('/');
     let parentFolderToken: string;
@@ -550,108 +535,60 @@ export class SyncEngine {
       parentFolderToken = await this.apiClient.ensureFolderPath(subPath, targetFolderToken);
     }
 
-    // 查找已有的同步记录（兼容多种 recordKey 格式）
-    let recordKey = folderConfigId ? `${folderConfigId}::${file.path}` : file.path;
-    let existingRecord = syncRecords[recordKey];
+    // 在云端文件列表中查找同名文件
+    const cloudFile = cloudFiles.find(f =>
+      (f.name === file.name || f.name === file.name.replace(/\.[^.]+$/, '')) &&
+      (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
+    );
 
-    // 兼容旧格式：如果找不到，尝试其他格式
-    if (!existingRecord) {
-      for (const [key, record] of Object.entries(syncRecords)) {
-        if (key.endsWith(`::${file.path}`) || key === file.path) {
-          existingRecord = record;
-          recordKey = key;
-          break;
+    // 如果云端有同名文件，下载并比较哈希
+    if (cloudFile) {
+      try {
+        const cloudContent = await this.apiClient.downloadFile(cloudFile.token, cloudFile.type);
+        const cloudHash = await computeHash(cloudContent);
+
+        if (cloudHash === currentHash) {
+          // 哈希相同，内容未变化，跳过上传
+          log.debug(`文件未变化，跳过: ${file.path}`);
+          return false;
         }
+
+        // 哈希不同，文件已变化，需要重新上传
+        log.info(`文件已变化，重新上传: ${file.path}`);
+        this.addLog('upload', file.path, `文件已变化 (云端哈希: ${cloudHash.substring(0, 8)}...)`);
+
+        // 删除旧文件并上传新文件
+        await this.apiClient.deleteFile(cloudFile.token, cloudFile.type);
+        const { fileToken, fileType } = await this.uploadFileContent(file, content, parentFolderToken);
+        log.debug(`文件重新上传成功，token: ${fileToken}`);
+        return true;
+      } catch (error) {
+        // 下载或比较失败，当作新文件处理
+        log.warn(`检查云端文件失败，当作新文件上传: ${file.path}`, error);
       }
     }
 
-    // 增量判断：内容哈希相同 + 父目录相同
-    if (existingRecord && existingRecord.hash === currentHash && existingRecord.parentFolderToken === parentFolderToken) {
-      // 内容未变化，跳过上传（不再检查云端存在性，避免不必要的 API 调用和网络延迟）
-      log.debug(`文件未变化，跳过: ${file.path}`);
-      return false;
-    }
+    // 云端没有同名文件，上传新文件
+    log.info(`新文件，上传: ${file.path}`);
+    this.addLog('upload', file.path, '新文件');
 
-    // 内容变化或为新文件
-    if (existingRecord) {
-      log.info(`文件已变化，重新上传: ${file.path}`);
-      this.addLog('upload', file.path, `文件已变化 (旧哈希: ${existingRecord.hash.substring(0, 8)}...)`);
-    } else {
-      log.info(`新文件，上传: ${file.path}`);
-      this.addLog('upload', file.path, '新文件');
-    }
-
-    // 执行上传
-    const { fileToken, fileType } = await this.uploadFileContent(
-      file,
-      content,
-      parentFolderToken,
-      existingRecord,
-      cloudFiles
-    );
-
-    // 更新同步记录
-    syncRecords[recordKey] = {
-      hash: currentHash,
-      lastSyncTime: Date.now(),
-      cloudToken: fileToken,
-      cloudType: fileType,
-      parentFolderToken: parentFolderToken,
-      folderConfigId: folderConfigId,
-    };
-
+    const { fileToken, fileType } = await this.uploadFileContent(file, content, parentFolderToken);
+    log.debug(`新文件上传成功，token: ${fileToken}`);
     return true;
   }
 
   /**
-   * 上传文件内容到飞书
+   * 上传文件内容到飞书（纯上传，不处理删除逻辑）
    */
   private async uploadFileContent(
     file: TFile,
     content: string | ArrayBuffer,
-    parentFolderToken: string,
-    existingRecord: FileSyncRecord | undefined,
-    cloudFiles?: FeishuFileMeta[]
+    parentFolderToken: string
   ): Promise<{ fileToken: string; fileType: string }> {
     const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
 
     if (!this.apiClient.checkFileSize(fileSize)) {
       throw new Error('文件大小超过限制');
-    }
-
-    // 如果有同步记录，先删除云端旧文件
-    if (existingRecord) {
-      try {
-        await this.apiClient.deleteFile(existingRecord.cloudToken, existingRecord.cloudType);
-        log.debug('旧文件已删除');
-      } catch (deleteError) {
-        const errMsg = (deleteError as Error).message || '';
-        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-          log.warn('删除旧文件失败（IP 白名单限制），将上传为新文件');
-          new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
-        } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
-          // 1061007: 文件不存在，1061001: 未知错误（可能是并发导致文件已删除）
-          log.debug('旧文件已不存在或无法删除，视为删除成功');
-        } else {
-          log.warn('删除旧文件失败，继续上传:', deleteError);
-        }
-      }
-    } else {
-      // 没有同步记录（新文件），云端可能存在同名文件
-      // 优先使用预获取的云端文件列表（性能优化），无列表时回退到 API 查询
-      const existingFile = cloudFiles
-        ? cloudFiles.find(f =>
-            (f.name === file.name || f.name === file.name.replace(/\.[^.]+$/, '')) &&
-            (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
-          )
-        : await this.apiClient.findFileByName(file.name, parentFolderToken);
-      if (existingFile) {
-        try {
-          await this.apiClient.deleteFile(existingFile.token, existingFile.type);
-        } catch (deleteError) {
-          log.warn('删除同名文件失败，继续上传:', deleteError);
-        }
-      }
     }
 
     // 上传文件
@@ -671,97 +608,121 @@ export class SyncEngine {
   }
 
   /**
-   * 处理文件重命名
+   * 处理文件重命名（云端优先模式）
+   * 在云端文件列表中查找旧文件名，删除旧文件
    */
   async handleRename(oldPath: string, newPath: string): Promise<void> {
-    const syncRecords = await this.plugin.loadSyncRecords();
+    // 确定文件所属的映射
+    const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+    let targetFolderToken: string | null = null;
 
-    // 尝试多种 recordKey 格式查找旧记录
-    let oldRecord: FileSyncRecord | undefined;
-    let oldRecordKey: string | undefined;
-
-    // 先尝试不带 folderConfigId 的 key
-    if (syncRecords[oldPath]) {
-      oldRecord = syncRecords[oldPath];
-      oldRecordKey = oldPath;
-    } else {
-      // 尝试带 folderConfigId 前缀的 key
-      for (const [key, record] of Object.entries(syncRecords)) {
-        if (key.endsWith(`::${oldPath}`) || key === oldPath) {
-          oldRecord = record;
-          oldRecordKey = key;
-          break;
+    for (const config of enabledConfigs) {
+      if (oldPath.startsWith(config.localPath + '/') || oldPath === config.localPath) {
+        targetFolderToken = config.remoteFolderToken || null;
+        if (!targetFolderToken) {
+          targetFolderToken = await this.ensureFolderForMapping(config);
         }
+        break;
       }
     }
 
-    if (oldRecord) {
-      try {
-        await this.apiClient.deleteFile(oldRecord.cloudToken, oldRecord.cloudType);
-        log.info(`重命名：已删除旧路径云端文件 ${oldPath}`);
-        this.addLog('delete', oldPath, `重命名为 ${newPath}，删除旧云端文件`);
-      } catch (deleteError) {
-        const errMsg = (deleteError as Error).message || '';
-        if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
-          log.warn(`重命名 ${oldPath} → ${newPath}：删除旧文件失败（IP 白名单限制）`);
-          new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
-          this.addLog('warn', oldPath, `重命名时删除旧云端文件失败（IP 白名单限制）`);
-        } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
-          // 1061007: 文件不存在，1061001: 未知错误（可能是并发导致文件已删除）
-          log.debug(`重命名：旧云端文件 ${oldPath} 已不存在或无法删除，视为删除成功`);
-        } else {
-          log.warn(`重命名 ${oldPath} → ${newPath}：删除旧云端文件失败，继续重命名流程:`, deleteError);
-          this.addLog('warn', oldPath, `删除旧云端文件失败: ${(deleteError as Error).message}`);
-        }
-      }
-      if (oldRecordKey) {
-        delete syncRecords[oldRecordKey];
+    // 旧版兼容：如果没找到映射，尝试使用 feishuRootFolderToken
+    if (!targetFolderToken) {
+      targetFolderToken = this.plugin.settings.feishuRootFolderToken;
+      if (!targetFolderToken) {
+        targetFolderToken = await this.ensureDefaultFolder();
       }
     }
 
-    await this.plugin.saveSyncRecords(syncRecords);
+    // 获取云端文件列表，查找旧文件
+    const oldFileName = oldPath.split('/').pop() || oldPath;
+    try {
+      const cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      const oldCloudFile = cloudFiles.find(f =>
+        f.name === oldFileName || f.name === oldFileName.replace(/\.[^.]+$/, '')
+      );
+
+      if (oldCloudFile && oldCloudFile.type !== 'folder') {
+        try {
+          await this.apiClient.deleteFile(oldCloudFile.token, oldCloudFile.type);
+          log.info(`重命名：已删除旧路径云端文件 ${oldFileName}`);
+          this.addLog('delete', oldPath, `重命名为 ${newPath}，删除旧云端文件`);
+        } catch (deleteError) {
+          const errMsg = (deleteError as Error).message || '';
+          if (errMsg.includes('99991401') || errMsg.includes('denied by app setting')) {
+            log.warn(`重命名 ${oldPath} → ${newPath}：删除旧文件失败（IP 白名单限制）`);
+            new Notice('飞书 IP 白名单限制，无法删除旧版本文件', 8000);
+            this.addLog('warn', oldPath, `重命名时删除旧云端文件失败（IP 白名单限制）`);
+          } else if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
+            log.debug(`重命名：旧云端文件 ${oldFileName} 已不存在或无法删除，视为删除成功`);
+          } else {
+            log.warn(`重命名 ${oldPath} → ${newPath}：删除旧云端文件失败，继续重命名流程:`, deleteError);
+            this.addLog('warn', oldPath, `删除旧云端文件失败: ${(deleteError as Error).message}`);
+          }
+        }
+      }
+    } catch (error) {
+      log.warn(`重命名 ${oldPath} → ${newPath}：获取云端文件列表失败`, error);
+    }
   }
 
   /**
-   * 处理文件删除
+   * 处理文件删除（云端优先模式）
+   * 在云端文件列表中查找该文件，删除云端文件
    */
   async handleDelete(filePath: string): Promise<void> {
     if (!this.plugin.settings.syncOnDelete) {
       return;
     }
 
-    const syncRecords = await this.plugin.loadSyncRecords();
+    // 确定文件所属的映射
+    const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+    let targetFolderToken: string | null = null;
 
-    // 尝试多种 recordKey 格式
-    let record: FileSyncRecord | undefined;
-    let recordKey: string | undefined;
-
-    if (syncRecords[filePath]) {
-      record = syncRecords[filePath];
-      recordKey = filePath;
-    } else {
-      for (const [key, rec] of Object.entries(syncRecords)) {
-        if (key.endsWith(`::${filePath}`) || key === filePath) {
-          record = rec;
-          recordKey = key;
-          break;
+    for (const config of enabledConfigs) {
+      if (filePath.startsWith(config.localPath + '/') || filePath === config.localPath) {
+        targetFolderToken = config.remoteFolderToken || null;
+        if (!targetFolderToken) {
+          targetFolderToken = await this.ensureFolderForMapping(config);
         }
+        break;
       }
     }
 
-    if (record) {
-      try {
-        await this.apiClient.deleteFile(record.cloudToken, record.cloudType);
-        log.info(`已删除云端文件: ${filePath}`);
-        this.addLog('delete', filePath, '本地文件已删除，同步删除云端文件');
-      } catch (error) {
-        log.warn('删除云端文件失败:', error);
-        this.addLog('error', filePath, `删除云端文件失败: ${(error as Error).message}`);
+    // 旧版兼容：如果没找到映射，尝试使用 feishuRootFolderToken
+    if (!targetFolderToken) {
+      targetFolderToken = this.plugin.settings.feishuRootFolderToken;
+      if (!targetFolderToken) {
+        targetFolderToken = await this.ensureDefaultFolder();
       }
-      if (recordKey) {
-        delete syncRecords[recordKey];
+    }
+
+    // 获取云端文件列表，查找该文件
+    const fileName = filePath.split('/').pop() || filePath;
+    try {
+      const cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      const cloudFile = cloudFiles.find(f =>
+        f.name === fileName || f.name === fileName.replace(/\.[^.]+$/, '')
+      );
+
+      if (cloudFile && cloudFile.type !== 'folder') {
+        try {
+          await this.apiClient.deleteFile(cloudFile.token, cloudFile.type);
+          log.info(`已删除云端文件: ${fileName}`);
+          this.addLog('delete', filePath, '本地文件已删除，同步删除云端文件');
+        } catch (error) {
+          const errMsg = (error as Error).message || '';
+          if (errMsg.includes('1061007') || errMsg.includes('1061001') || errMsg.includes('file has been delete') || errMsg.includes('unknown error')) {
+            // 文件不存在，忽略
+            log.debug(`删除云端文件 ${fileName} 失败：文件已不存在`);
+          } else {
+            log.warn(`删除云端文件 ${fileName} 失败:`, error);
+            this.addLog('error', filePath, `删除云端文件失败: ${errMsg}`);
+          }
+        }
       }
-      await this.plugin.saveSyncRecords(syncRecords);
+    } catch (error) {
+      log.warn(`删除云端文件 ${fileName}：获取云端文件列表失败`, error);
     }
   }
 

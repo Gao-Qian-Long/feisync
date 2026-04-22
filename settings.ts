@@ -239,6 +239,8 @@ export interface FeiSyncPluginSettings {
   feishuUserToken: string;
   // 新增：多文件夹映射
   syncFolders: SyncFolderConfig[];
+  // 同步记录清除时间戳，用于判断是否需要检查云端
+  recordsClearedAt: number | null;
 }
 
 // 默认设置
@@ -260,6 +262,7 @@ const DEFAULT_SETTINGS: FeiSyncPluginSettings = {
   syncRecords: {},
   feishuUserToken: '',
   syncFolders: [],
+  recordsClearedAt: null,
 };
 
 /**
@@ -626,20 +629,19 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     // ==================== 忽略规则（配置文件方式）====================
     containerEl.createEl('h3', { text: '同步忽略规则' });
 
-    const ignoreDesc = `创建 ${FEISYNC_IGNORE_FILE} 文件可排除特定文件/文件夹不同步。语法兼容 .gitignore。`;
+    const ignoreDesc = `创建 ${FEISYNC_IGNORE_FILE} 文件可排除特定文件/文件夹不同步。`;
     containerEl.createEl('p', { text: ignoreDesc, cls: 'feisync-hint' });
 
-    // 语法说明
+    // 语法说明（紧凑格式）
     const syntaxHint = containerEl.createEl('div', {
       cls: 'feisync-hint',
-      attr: { style: 'font-size: 12px; line-height: 1.6;' }
+      attr: { style: 'font-size: 11px; color: var(--text-muted); line-height: 1.5;' }
     });
     syntaxHint.innerHTML = `
-      <b>语法示例：</b><br>
-      • <code>attachments/</code> — 忽略 attachments 目录<br>
-      • <code>*.tmp</code> — 忽略所有 .tmp 文件<br>
-      • <code>**/file</code> — 忽略任意位置的匹配文件<br>
-      • <code>!important.md</code> — 取消忽略（排除例外）
+      语法：<code>attachments/</code> 忽略目录 &nbsp;
+      <code>*.tmp</code> 忽略扩展名 &nbsp;
+      <code>**/.bak</code> 任意位置 &nbsp;
+      <code>!file.md</code> 取消忽略
     `;
 
     // 检查忽略规则文件是否存在
@@ -963,16 +965,17 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('清除同步记录')
-      .setDesc('清除所有文件的同步记录，下次同步时将重新上传所有文件')
+      .setName('重置同步记录')
+      .setDesc('清除本地记录后，首次同步会自动检查云端是否有相同文件（hash 相同则跳过上传）')
       .addButton((button) => {
         const recordCount = Object.keys(this.plugin.settings.syncRecords || {}).length;
-        button.setButtonText(`清除同步记录 (${recordCount} 条)`)
+        button.setButtonText(`重置记录 (${recordCount} 条)`)
           .setWarning()
           .onClick(async () => {
             this.plugin.settings.syncRecords = {};
+            this.plugin.settings.recordsClearedAt = Date.now();
             await this.plugin.saveSettings();
-            new Notice('同步记录已清除');
+            new Notice(`同步记录已重置，将检查云端已有文件`);
             this.display();
           });
       });
