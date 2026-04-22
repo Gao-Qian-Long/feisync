@@ -1,6 +1,6 @@
 # FeiSync
 
-Sync your Obsidian notes to Feishu (Lark) Drive.
+Sync your notes to Feishu (Lark) Drive.
 
 [中文说明](README_zh.md)
 
