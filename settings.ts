@@ -383,7 +383,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    new Setting(containerEl).setName('General').setHeading();
+    new Setting(containerEl).setName('FeiSync').setHeading();
 
     // ==================== 常用操作（最优先）====================
     new Setting(containerEl).setName('Quick actions').setHeading();
@@ -672,9 +672,9 @@ export class FeiSyncSettingTab extends PluginSettingTab {
               new FeishuFolderBrowserModal(
                 this.app,
                 this.plugin.apiClient!,
-                (folderToken: string, folderName: string) => {
+                async (folderToken: string, folderName: string) => {
                   this.plugin.settings.feishuRootFolderToken = folderToken;
-                  this.plugin.saveSettings();
+                  await this.plugin.saveSettings();
                   this.display();
                   new Notice(`已选择根目录: ${folderName}`);
                 },
@@ -685,7 +685,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     }
 
     // ==================== 同步选项 ====================
-    new Setting(containerEl).setName('Sync options').setHeading();
+    new Setting(containerEl).setName('Sync').setHeading();
 
     new Setting(containerEl)
       .setName('自动同步')
@@ -791,8 +791,8 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('App Secret')
-      .setDesc('对应的 App Secret')
+      .setName('App secret')
+      .setDesc('对应的 App secret')
       .addText((text: TextComponent) => {
         text.inputEl.addClass('feisync-input-width');
         text.inputEl.type = 'password';
@@ -807,12 +807,12 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       });
 
     containerEl.createEl('p', {
-      text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive）',
+      text: '提示：请确保在飞书开放平台为应用开启以下权限：drive:drive（云空间）、drive:export:readonly（导出文档）、drive:file:download（下载文件）、docx:document（在线文档）、docs:document:import（导入文档）、docs:document:export（导出文档）',
       cls: 'feisync-hint'
     });
 
     // ==================== 网络设置 ====================
-    new Setting(containerEl).setName('Network settings').setHeading();
+    new Setting(containerEl).setName('Network').setHeading();
 
     new Setting(containerEl)
       .setName('使用代理')
@@ -884,8 +884,8 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
     const ignoreFile = this.app.vault.getAbstractFileByPath(FEISYNC_IGNORE_FILE);
 
-    // 语法说明（紧凑）
-    const syntaxHint = containerEl.createEl('div', { cls: 'feisync-syntax-hint' });
+    // 语法说明
+    const syntaxHint = containerEl.createEl('p', { cls: 'feisync-hint' });
     syntaxHint.createSpan({ text: '语法：' });
     syntaxHint.createEl('code', { text: 'folder/', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略目录 ' });
     syntaxHint.createEl('code', { text: '*.ext', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略扩展名 ' });
@@ -919,7 +919,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .addButton((button) => {
           button.setButtonText('在编辑器中打开')
             .onClick(() => {
-              this.app.workspace.openLinkText(FEISYNC_IGNORE_FILE, '');
+              void this.app.workspace.openLinkText(FEISYNC_IGNORE_FILE, '');
             });
         })
         .addButton((button) => {
@@ -932,7 +932,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
                     await this.app.vault.modify(ignoreFile, defaultContent);
                     new Notice('已重置为默认规则');
                     await this.plugin.syncEngine?.reloadIgnoreFilter();
-                    this.plugin.fileWatcher?.reloadIgnoreFilter();
+                    await this.plugin.fileWatcher?.reloadIgnoreFilter();
                   }
                 } catch (err) {
                   new Notice('重置失败: ' + (err as Error).message);
@@ -943,7 +943,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     }
 
     // ==================== 高级设置 ====================
-    new Setting(containerEl).setName('Advanced settings').setHeading();
+    new Setting(containerEl).setName('Advanced').setHeading();
 
     new Setting(containerEl)
       .setName('并发上传数')

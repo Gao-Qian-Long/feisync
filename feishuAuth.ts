@@ -528,12 +528,7 @@ export class FeishuAuthManager {
         log.debug('已有刷新操作进行中，等待完成...');
       }
 
-      try {
-        await this.refreshPromise;
-      } catch (error) {
-        // 刷新失败，错误已在 doRefreshUserToken 中处理
-        throw error;
-      }
+      await this.refreshPromise;
 
       // 刷新后检查 token 是否仍可用（可能已被清除需要重新授权）
       if (!this.userTokenInfo) {

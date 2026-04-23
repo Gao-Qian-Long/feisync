@@ -85,7 +85,7 @@ class ConcurrencyPool {
       };
 
       if (this.running < this.maxConcurrency) {
-        task();
+        void task();
       } else {
         this.queue.push(task);
       }
@@ -95,7 +95,7 @@ class ConcurrencyPool {
   private next(): void {
     if (this.queue.length > 0 && this.running < this.maxConcurrency) {
       const task = this.queue.shift();
-      task?.();
+      void task?.();
     }
   }
 }

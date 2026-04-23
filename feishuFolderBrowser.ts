@@ -80,7 +80,7 @@ export class FeishuFolderBrowserModal extends Modal {
 
 	onOpen(): void {
 		this.titleEl.setText('选择飞书文件夹');
-		this.renderContent();
+		void this.renderContent();
 	}
 
 	onClose(): void {
@@ -158,12 +158,12 @@ export class FeishuFolderBrowserModal extends Modal {
 		rootItem.addEventListener('click', () => {
 			this.currentFolderToken = '';
 			this.currentPath = [];
-			this.renderContent();
+			void this.renderContent();
 		});
 
 		// 子目录
 		for (let i = 0; i < this.currentPath.length; i++) {
-			const separator = breadcrumb.createSpan({ text: ' / ', cls: 'feisync-breadcrumb-separator' });
+			breadcrumb.createSpan({ text: ' / ', cls: 'feisync-breadcrumb-separator' });
 
 			const item = this.currentPath[i];
 			const isLast = i === this.currentPath.length - 1;
@@ -177,7 +177,7 @@ export class FeishuFolderBrowserModal extends Modal {
 				// 导航到该层级
 				this.currentFolderToken = item.token;
 				this.currentPath = this.currentPath.slice(0, i + 1);
-				this.renderContent();
+				void this.renderContent();
 			});
 		}
 	}
@@ -224,7 +224,7 @@ export class FeishuFolderBrowserModal extends Modal {
 						this.currentPath.push({ name: folder.name, token: folder.token });
 						this.currentFolderToken = folder.token;
 						log.debug(`进入文件夹: ${folder.name} (token: ${folder.token})`);
-						this.renderContent();
+						void this.renderContent();
 					});
 				}
 			}
@@ -319,7 +319,7 @@ export class FeishuFileTreeModal extends Modal {
 
 	onOpen(): void {
 		this.titleEl.setText(`飞书文件树 - ${this.rootPath}`);
-		this.renderContent();
+		void this.renderContent();
 		void this.loadTree();
 	}
 

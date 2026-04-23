@@ -19,9 +19,7 @@ const API_RATE_LIMIT_QPS = 5;
 const RATE_LIMIT_WINDOW = 1000;
 
 // 飞书 API 通用响应结构
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
 interface FeishuApiResponseData {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
   [key: string]: any;
 }
 
@@ -29,7 +27,6 @@ interface FeishuApiResponse {
   code: number;
   msg: string;
   data?: FeishuApiResponseData;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
   [key: string]: any;
 }
 
@@ -315,7 +312,7 @@ export class FeishuApiClient {
       }
 
       try {
-        return response.json;
+        return response.json as FeishuApiResponse;
       } catch {
         throw new Error(`JSON 解析失败: ${responseText.substring(0, 200)}`);
       }
