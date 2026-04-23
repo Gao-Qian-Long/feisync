@@ -175,9 +175,9 @@ export class FeishuAuthManager {
 
         const token = data.tenant_access_token as string;
         // 从 API 响应中读取令牌有效期（秒），如无则默认 7200 秒（2小时）
-        const expireSeconds = data.expire || 7200;
-        // 提前5分钟过期以确保安全
-        const tokenLifetimeSeconds = expireSeconds - TOKEN_EXPIRY_BUFFER_SECONDS;
+        const expireSeconds = typeof data.expire === 'number' ? data.expire : 7200;
+        // 提前5分钟过期以确保安全，但保留至少60秒有效时间
+        const tokenLifetimeSeconds = Math.max(60, expireSeconds - TOKEN_EXPIRY_BUFFER_SECONDS);
         this.cachedToken = token;
         this.tokenExpiry = Date.now() + tokenLifetimeSeconds * 1000;
 
@@ -267,7 +267,7 @@ export class FeishuAuthManager {
   async startLocalCallbackServer(port: number = 9527): Promise<string> {
     return new Promise((resolve, reject) => {
       let server: http.Server | null = null;
-      let timeoutId: NodeJS.Timeout | null = null;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
       let resolved = false; // 防止浏览器重复请求导致多次处理
 
       const cleanup = () => {
@@ -437,7 +437,11 @@ export class FeishuAuthManager {
     this.userTokenInfo = tokenInfo;
     this._wasUserAuthorized = true;
     log.info('用户令牌获取成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    await this.onTokenChange?.();
+    try {
+      await this.onTokenChange?.();
+    } catch (err) {
+      log.error('Token 持久化回调失败:', err);
+    }
 
     return tokenInfo;
   }
@@ -491,7 +495,11 @@ export class FeishuAuthManager {
 
     this.userTokenInfo = tokenInfo;
     log.info('用户令牌刷新成功，有效期至:', new Date(tokenInfo.expiresAt).toLocaleString());
-    await this.onTokenChange?.();
+    try {
+      await this.onTokenChange?.();
+    } catch (err) {
+      log.error('Token 持久化回调失败:', err);
+    }
 
     return tokenInfo;
   }

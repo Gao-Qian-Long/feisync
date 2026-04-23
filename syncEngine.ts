@@ -224,7 +224,7 @@ export class SyncEngine {
     } else if (result.success) {
       const parts: string[] = [];
       if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
-      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
+      if (result.skippedCount > 0) parts.push(`未变化 ${result.skippedCount} 个`);
       if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
       if (parts.length === 0) parts.push('无变化');
       const msg = `同步完成！${parts.join('，')}`;
@@ -364,16 +364,16 @@ export class SyncEngine {
       return result;
     }
 
-    log.info(`映射 "${folderConfig.localPath}": 开始上传 ${localFiles.length} 个文件到 ${targetFolderToken.substring(0, 12)}...`);
+    log.info(`映射 "${folderConfig.localPath}": 开始同步 ${localFiles.length} 个文件到 ${targetFolderToken.substring(0, 12)}...`);
     new Notice(`同步 "${folderConfig.localPath}": ${localFiles.length} 个文件...`);
 
     try {
       await this.uploadFiles(localFiles, folderConfig.localPath, targetFolderToken, result, cloudFiles);
-      log.info(`映射 "${folderConfig.localPath}": 上传完成，上传=${result.uploadedCount}，跳过=${result.skippedCount}，失败=${result.failedCount}`);
+      log.info(`映射 "${folderConfig.localPath}": 同步完成，上传=${result.uploadedCount}，未变化=${result.skippedCount}，失败=${result.failedCount}`);
     } catch (error) {
       const errMsg = (error as Error).message || String(error);
-      log.error(`映射 "${folderConfig.localPath}": 上传异常: ${errMsg}`);
-      result.errors.push(`映射 "${folderConfig.localPath}" 上传异常: ${errMsg}`);
+      log.error(`映射 "${folderConfig.localPath}": 同步异常: ${errMsg}`);
+      result.errors.push(`映射 "${folderConfig.localPath}" 同步异常: ${errMsg}`);
       result.success = false;
     }
 
@@ -589,9 +589,10 @@ export class SyncEngine {
         searchFiles = [];
       }
     }
+    const supportedTypes = new Set(['file', 'docx', 'doc', 'sheet', 'bitable', 'slides']);
     const cloudFile = searchFiles.find(f =>
       (f.name === file.name || f.name === file.name.replace(/\.[^.]+$/, '')) &&
-      (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
+      supportedTypes.has(f.type)
     );
 
     // 如果云端有同名文件，下载并比较哈希
@@ -602,7 +603,7 @@ export class SyncEngine {
 
         if (cloudHash === currentHash) {
           // 哈希相同，内容未变化，跳过上传
-          log.debug(`文件未变化，跳过: ${file.path}`);
+          log.info(`文件未变化，跳过上传: ${file.path} (哈希匹配)`);
           return false;
         }
 
@@ -879,6 +880,7 @@ export class SyncEngine {
 
   /**
    * 递归下载文件夹内容
+   * 使用并发池限制同时下载的文件数，避免对飞书 API 造成过大压力
    */
   private async downloadFolder(
     folderToken: string,
@@ -895,19 +897,26 @@ export class SyncEngine {
 
     log.debug(`downloadFolder: folderToken=${folderToken}, 找到 ${files.length} 个项目`);
 
-    for (const file of files) {
-      if (file.type === 'folder') {
-        const subLocalPath = localPath ? `${localPath}/${file.name}` : file.name;
-        const folder = this.vault.getFolderByPath(subLocalPath);
-        if (!folder) {
-          try {
-            await this.vault.createFolder(subLocalPath);
-          } catch {
-            // 文件夹可能已存在
-          }
+    // 先处理所有子文件夹（串行创建，避免并发创建同一文件夹的竞争）
+    const subFolders = files.filter(f => f.type === 'folder');
+    for (const folder of subFolders) {
+      const subLocalPath = localPath ? `${localPath}/${folder.name}` : folder.name;
+      const existingFolder = this.vault.getFolderByPath(subLocalPath);
+      if (!existingFolder) {
+        try {
+          await this.vault.createFolder(subLocalPath);
+        } catch {
+          // 文件夹可能已存在
         }
-        await this.downloadFolder(file.token, subLocalPath, result);
-      } else {
+      }
+      await this.downloadFolder(folder.token, subLocalPath, result);
+    }
+
+    // 使用并发池下载文件
+    const downloadPool = new ConcurrencyPool(this.plugin.settings.maxConcurrentUploads);
+    const fileTasks = files
+      .filter(f => f.type !== 'folder')
+      .map(file => downloadPool.run(async () => {
         try {
           await this.downloadSingleFile(file, localPath, result);
         } catch (error) {
@@ -926,8 +935,9 @@ export class SyncEngine {
             log.error(errorMsg);
           }
         }
-      }
-    }
+      }));
+
+    await Promise.all(fileTasks);
   }
 
   /**
@@ -1060,14 +1070,14 @@ export class SyncEngine {
     if (result.failedCount === 0) {
       const parts: string[] = [];
       if (result.uploadedCount > 0) parts.push(`上传 ${result.uploadedCount} 个`);
-      if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 个`);
+      if (result.skippedCount > 0) parts.push(`未变化 ${result.skippedCount} 个`);
       if (result.deletedCount > 0) parts.push(`删除 ${result.deletedCount} 个`);
       if (parts.length === 0) parts.push('无变化');
       const msg = `同步完成！${parts.join('，')}`;
       new Notice(msg);
       this.addLog('info', '', msg);
     } else {
-      const msg = `同步完成：上传 ${result.uploadedCount}，跳过 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
+      const msg = `同步完成：上传 ${result.uploadedCount}，未变化 ${result.skippedCount}，删除 ${result.deletedCount}，失败 ${result.failedCount}`;
       new Notice(msg);
       this.addLog('info', '', msg);
     }

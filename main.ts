@@ -35,7 +35,7 @@ export default class FeiSyncPlugin extends Plugin {
   statusBarItemEl: HTMLElement | null = null;
 
   // 定时同步计时器
-  private scheduledSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduledSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   // 同步锁，防止并发同步
   private isSyncing: boolean = false;
@@ -411,6 +411,13 @@ export default class FeiSyncPlugin extends Plugin {
           method: 'GET',
           throw: false,
         });
+        // 转发代理通常只配置了 API 路径，根路径 404 属于正常情况
+        if (response.status === 404) {
+          return { success: true, message: '代理服务器可达（HTTP 404：无根路由，属于正常情况）' };
+        }
+        if (response.status >= 500) {
+          return { success: false, message: `代理服务器返回错误（HTTP ${response.status}），请检查代理服务状态` };
+        }
         return { success: true, message: `代理服务器可达（HTTP ${response.status}）` };
       } catch (error) {
         const msg = (error as Error).message;
@@ -595,7 +602,7 @@ export default class FeiSyncPlugin extends Plugin {
   toggleScheduledSync(enable: boolean): void {
     // 清除旧定时器
     if (this.scheduledSyncTimer) {
-      clearInterval(this.scheduledSyncTimer);
+      clearTimeout(this.scheduledSyncTimer);
       this.scheduledSyncTimer = null;
     }
 
@@ -603,16 +610,25 @@ export default class FeiSyncPlugin extends Plugin {
       const intervalMs = this.settings.scheduledSyncInterval * 60 * 1000;
       log.info(`启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
 
-      this.scheduledSyncTimer = setInterval(() => {
-        void (async () => {
-          try {
-            log.info('定时同步触发');
-            await this.sync();
-          } catch (error) {
-            log.error('定时同步失败:', error);
-          }
-        })();
-      }, intervalMs);
+      const scheduleNext = () => {
+        this.scheduledSyncTimer = setTimeout(() => {
+          void (async () => {
+            try {
+              log.info('定时同步触发');
+              await this.sync();
+            } catch (error) {
+              log.error('定时同步失败:', error);
+            } finally {
+              // 只有仍然启用时才安排下一次
+              if (this.scheduledSyncTimer) {
+                scheduleNext();
+              }
+            }
+          })();
+        }, intervalMs);
+      };
+
+      scheduleNext();
     } else {
       log.info('定时同步已停止');
     }

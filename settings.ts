@@ -133,6 +133,7 @@ class AddFolderMappingModal extends Modal {
         .addText((text: TextComponent) => {
           text.inputEl.addClass('feisync-input-width');
           text.setPlaceholder('fldcnxxxxxxxx')
+            .setValue(this.remoteFolderToken)
             .onChange((value: string) => {
               this.remoteFolderToken = value.trim();
             });
@@ -837,7 +838,13 @@ export class FeiSyncSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.proxyUrl)
             .onChange((value: string) => {
               void (async () => {
-                this.plugin.settings.proxyUrl = value.trim();
+                const trimmed = value.trim();
+                // 基本格式校验：必须以 http:// 或 https:// 开头
+                if (trimmed && !/^https?:\/\//.test(trimmed)) {
+                  new Notice('代理地址必须以 http:// 或 https:// 开头');
+                  return;
+                }
+                this.plugin.settings.proxyUrl = trimmed;
                 await this.plugin.saveSettings();
               })();
             });

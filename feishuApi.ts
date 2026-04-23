@@ -205,7 +205,7 @@ export class FeishuApiClient {
   private async fetchWithTimeout(
     url: string,
     options: RequestInit & { body?: FormData | string | ArrayBuffer | Record<string, unknown> | Blob },
-    _timeout: number = REQUEST_TIMEOUT
+    timeout: number = REQUEST_TIMEOUT
   ): Promise<FeishuApiResponse> {
     // 速率限制
     await this.rateLimiter.acquire();
@@ -270,6 +270,10 @@ export class FeishuApiClient {
       body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
     }
 
+    // 生成请求追踪 ID，便于代理端与插件端日志对照排查
+    const requestId = `fs-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    headers['X-Request-ID'] = requestId;
+
     const requestParams: RequestUrlParam = {
       url,
       method,
@@ -279,12 +283,25 @@ export class FeishuApiClient {
     };
 
     try {
-      const response = await requestUrl(requestParams);
+      // 使用 Promise.race 实现客户端超时保护
+      // 注意：requestUrl 无法取消，超时后仅抛错终止当前逻辑，底层请求仍在后台执行
+      const fetchPromise = requestUrl(requestParams);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`请求超时（${timeout}ms）`)), timeout);
+      });
+      const response = await Promise.race([fetchPromise, timeoutPromise]);
 
       const responseText = typeof response.text === 'string' ? response.text : JSON.stringify(response.json);
 
       // requestUrl 对 4xx/5xx 不会自动抛出，但保险起见检查 status
       if (response.status >= 400) {
+        // 代理层错误：帮助用户快速定位是代理问题还是飞书 API 问题
+        if (this.proxyUrl && (response.status === 502 || response.status === 503 || response.status === 504)) {
+          throw new Error(
+            `代理服务器错误 (HTTP ${response.status})：代理无法连接到飞书 API。` +
+            `请检查代理服务是否正常运行，以及代理服务器能否访问 open.feishu.cn`
+          );
+        }
         let errorMsg = `HTTP ${response.status}`;
         try {
           const errorData = response.json;
@@ -1004,9 +1021,10 @@ export class FeishuApiClient {
       const files = await this.listFolderContents(parentToken);
       // 飞书导出的文件可能被去除了扩展名，尝试两种形式匹配
       const nameWithoutExtension = fileName.replace(/\.[^.]+$/, '');
+      const supportedTypes = new Set(['file', 'docx', 'doc', 'sheet', 'bitable', 'slides']);
       return files.find(f =>
         (f.name === fileName || f.name === nameWithoutExtension) &&
-        (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')
+        supportedTypes.has(f.type)
       ) || null;
     } catch (error) {
       log.error('查找文件失败:', error);
@@ -1023,8 +1041,9 @@ export class FeishuApiClient {
   async checkFileExists(fileToken: string, parentFolderToken: string, fileName: string): Promise<boolean> {
     try {
       const files = await this.listFolderContents(parentFolderToken);
-      // 匹配条件：token 相同 或 同名同类型（file/docx/sheet）
-      return files.some(f => f.token === fileToken || (f.name === fileName && (f.type === 'file' || f.type === 'docx' || f.type === 'sheet')));
+      const supportedTypes = new Set(['file', 'docx', 'doc', 'sheet', 'bitable', 'slides']);
+      // 匹配条件：token 相同 或 同名同类型
+      return files.some(f => f.token === fileToken || (f.name === fileName && supportedTypes.has(f.type)));
     } catch (error) {
       const errMsg = (error as Error).message || '';
       // 授权错误：向上抛出，让调用方中止操作
