@@ -12,6 +12,39 @@ const log = createLogger('FeishuAuth');
 
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300; // 提前5分钟过期
 
+// 飞书 API 响应类型
+interface FeishuTokenResponse {
+  code: number;
+  msg: string;
+  app_access_token?: string;
+  tenant_access_token?: string;
+  expire?: number;
+}
+
+interface FeishuOAuthTokenResponse {
+  code: number;
+  msg: string;
+  error?: string;
+  error_description?: string;
+  data?: {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    open_id: string;
+    union_id: string;
+  };
+  // v1 兼容字段
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  open_id?: string;
+  union_id?: string;
+}
+
+interface FeishuValidateResponse {
+  code: number;
+}
+
 // 用户 token 信息接口
 export interface UserTokenInfo {
   accessToken: string;
@@ -122,12 +155,12 @@ export class FeishuAuthManager {
       throw: false,
     });
 
-    const data = response.json;
+    const data = response.json as FeishuTokenResponse;
     if (data.code !== 0) {
       throw new Error(`获取 app_access_token 失败: ${data.msg} (code: ${data.code})`);
     }
 
-    return data.app_access_token;
+    return data.app_access_token ?? '';
   }
 
   /**
@@ -168,12 +201,12 @@ export class FeishuAuthManager {
           throw: false,
         });
 
-        const data = response.json;
+        const data = response.json as FeishuTokenResponse;
         if (data.code !== 0) {
           throw new Error(`飞书 API 错误: ${data.msg} (code: ${data.code})`);
         }
 
-        const token = data.tenant_access_token as string;
+        const token = data.tenant_access_token ?? '';
         // 从 API 响应中读取令牌有效期（秒），如无则默认 7200 秒（2小时）
         const expireSeconds = typeof data.expire === 'number' ? data.expire : 7200;
         // 提前5分钟过期以确保安全，但保留至少60秒有效时间
@@ -187,7 +220,7 @@ export class FeishuAuthManager {
         log.warn(`获取 tenant_access_token 失败 (尝试 ${attempt + 1}/${MAX_RETRIES + 1}):`, error);
         // 如果不是最后一次尝试，等待片刻后重试
         if (attempt < MAX_RETRIES) {
-          await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1))); // 递增延迟
+          await new Promise(resolve => activeWindow.setTimeout(resolve, 1000 * (attempt + 1))); // 递增延迟
         }
       }
     }
@@ -267,13 +300,13 @@ export class FeishuAuthManager {
   async startLocalCallbackServer(port: number = 9527): Promise<string> {
     return new Promise((resolve, reject) => {
       let server: http.Server | null = null;
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      let timeoutId: number | null = null;
       let resolved = false; // 防止浏览器重复请求导致多次处理
 
       const cleanup = () => {
         this.callbackCancelFn = null;
         if (timeoutId) {
-          clearTimeout(timeoutId);
+          activeWindow.clearTimeout(timeoutId);
           timeoutId = null;
         }
         if (server) {
@@ -357,7 +390,7 @@ export class FeishuAuthManager {
       });
 
       // 超时处理：3 分钟未收到回调则关闭服务器
-      timeoutId = setTimeout(() => {
+      timeoutId = activeWindow.setTimeout(() => {
         cleanup();
         reject(new Error('等待授权回调超时（3分钟），请重新尝试授权'));
       }, 3 * 60 * 1000);
@@ -415,7 +448,7 @@ export class FeishuAuthManager {
       throw: false,
     });
 
-    const data = response.json;
+    const data = response.json as FeishuOAuthTokenResponse;
     log.debug('OAuth 响应:', JSON.stringify(data, null, 2));
 
     if (data.code !== 0) {
@@ -423,15 +456,15 @@ export class FeishuAuthManager {
     }
 
     // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
-    const result = data.data || data;
+    const result = data.data ?? data;
     const expiresIn = typeof result.expires_in === 'number' ? result.expires_in : 7200;
     const effectiveExpirySeconds = Math.max(60, expiresIn - TOKEN_EXPIRY_BUFFER_SECONDS);
     const tokenInfo: UserTokenInfo = {
-      accessToken: result.access_token,
-      refreshToken: result.refresh_token,
+      accessToken: result.access_token ?? '',
+      refreshToken: result.refresh_token ?? '',
       expiresAt: Date.now() + effectiveExpirySeconds * 1000,
-      openId: result.open_id || '',
-      unionId: result.union_id || '',
+      openId: result.open_id ?? '',
+      unionId: result.union_id ?? '',
     };
 
     this.userTokenInfo = tokenInfo;
@@ -476,21 +509,21 @@ export class FeishuAuthManager {
       throw: false,
     });
 
-    const data = response.json;
+    const data = response.json as FeishuOAuthTokenResponse;
     if (data.code !== 0) {
       throw new Error(`刷新用户令牌失败: ${data.msg} (code: ${data.code})`);
     }
 
     // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
-    const result = data.data || data;
+    const result = data.data ?? data;
     const expiresIn = typeof result.expires_in === 'number' ? result.expires_in : 7200;
     const effectiveExpirySeconds = Math.max(60, expiresIn - TOKEN_EXPIRY_BUFFER_SECONDS);
     const tokenInfo: UserTokenInfo = {
-      accessToken: result.access_token,
-      refreshToken: result.refresh_token,
+      accessToken: result.access_token ?? '',
+      refreshToken: result.refresh_token ?? '',
       expiresAt: Date.now() + effectiveExpirySeconds * 1000,
-      openId: result.open_id || '',
-      unionId: result.union_id || '',
+      openId: result.open_id ?? '',
+      unionId: result.union_id ?? '',
     };
 
     this.userTokenInfo = tokenInfo;
@@ -691,7 +724,7 @@ export async function validateToken(token: string, proxyUrl: string = ''): Promi
       throw: false,
     });
 
-    const data = response.json;
+    const data = response.json as FeishuValidateResponse;
     return data.code === 0;
   } catch (error) {
     log.error('验证令牌失败:', error);

@@ -132,7 +132,7 @@ class AddFolderMappingModal extends Modal {
         .setDesc('输入飞书云空间中目标文件夹的 token')
         .addText((text: TextComponent) => {
           text.inputEl.addClass('feisync-input-width');
-          text.setPlaceholder('fldcnxxxxxxxx')
+          text.setPlaceholder('Fldcnxxxxxxxx')
             .setValue(this.remoteFolderToken)
             .onChange((value: string) => {
               this.remoteFolderToken = value.trim();
@@ -176,7 +176,7 @@ class AddFolderMappingModal extends Modal {
               return;
             }
             if (this.mode === 'custom' && !this.remoteFolderToken) {
-              new Notice('自定义模式需要指定飞书文件夹 Token');
+              new Notice('自定义模式需要指定飞书文件夹 token');
               return;
             }
             const config = createSyncFolderConfig(this.localPath, this.mode, this.remoteFolderToken);
@@ -383,7 +383,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    new Setting(containerEl).setName('FeiSync').setHeading();
+    ;
 
     // ==================== 常用操作（最优先）====================
     new Setting(containerEl).setName('Quick actions').setHeading();
@@ -482,13 +482,13 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       });
 
       containerEl.createEl('p', {
-        text: '提示：在飞书开放平台 → 应用功能 → 网页应用，添加回调地址 http://localhost:9527/callback',
+        text: '提示：在飞书开放平台 → 应用功能 → 网页应用，添加回调地址 HTTP://localhost:9527/callback',
         cls: 'feisync-hint'
       });
 
       new Setting(containerEl)
         .setName('开始授权')
-        .setDesc('点击后在浏览器中完成飞书 OAuth 授权')
+        .setDesc('点击后在浏览器中完成飞书 OAUTH 授权')
         .addButton((button) => {
           let isAuthorizing = false;
 
@@ -527,7 +527,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
                 try {
                   const codePromise = this.plugin.authManager.startLocalCallbackServer(9527);
                   const oauthUrl = this.plugin.authManager.generateOAuthUrl('http://localhost:9527/callback');
-                  window.open(oauthUrl);
+                  activeWindow.open(oauthUrl);
                   new Notice('请在浏览器中完成飞书授权...');
 
                   const code = await codePromise;
@@ -665,18 +665,20 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     if (this.plugin.apiClient) {
       new Setting(containerEl)
         .setName('浏览飞书目录')
-        .setDesc('选择同步根目录（留空则自动创建 ObsidianSync 文件夹）')
+        .setDesc('选择同步根目录（留空则自动创建 obsidiansync 文件夹）')
         .addButton((button) => {
           button.setButtonText('浏览...')
             .onClick(() => {
               new FeishuFolderBrowserModal(
                 this.app,
                 this.plugin.apiClient!,
-                async (folderToken: string, folderName: string) => {
-                  this.plugin.settings.feishuRootFolderToken = folderToken;
-                  await this.plugin.saveSettings();
-                  this.display();
-                  new Notice(`已选择根目录: ${folderName}`);
+                (folderToken: string, folderName: string) => {
+                  void (async () => {
+                    this.plugin.settings.feishuRootFolderToken = folderToken;
+                    await this.plugin.saveSettings();
+                    this.display();
+                    new Notice(`已选择根目录: ${folderName}`);
+                  })();
                 },
                 ''
               ).open();
@@ -777,10 +779,10 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('App ID')
-      .setDesc('飞书开放平台创建应用后获得的 App ID')
+      .setDesc('飞书开放平台创建应用后获得的 app ID')
       .addText((text: TextComponent) => {
         text.inputEl.addClass('feisync-input-width');
-        text.setPlaceholder('cli_xxxxxxxx')
+        text.setPlaceholder('CLI_xxxxxxxx')
           .setValue(this.plugin.settings.appId)
           .onChange((value: string) => {
             void (async () => {
@@ -792,11 +794,11 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('App secret')
-      .setDesc('对应的 App secret')
+      .setDesc('对应的 app secret')
       .addText((text: TextComponent) => {
         text.inputEl.addClass('feisync-input-width');
         text.inputEl.type = 'password';
-        text.setPlaceholder('xxxxxxxxxxxxxxxx')
+        text.setPlaceholder('Xxxxxxxxxxxxxxxx')
           .setValue(this.plugin.settings.appSecret)
           .onChange((value: string) => {
             void (async () => {
@@ -831,17 +833,17 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     if (this.plugin.settings.enableProxy) {
       new Setting(containerEl)
         .setName('代理地址')
-        .setDesc('例如：http://proxy.com:8080')
+        .setDesc('例如：HTTP://proxy.com:8080')
         .addText((text: TextComponent) => {
           text.inputEl.addClass('feisync-input-width');
-          text.setPlaceholder('http://your-proxy.com:8080')
+          text.setPlaceholder('HTTP://your-proxy.com:8080')
             .setValue(this.plugin.settings.proxyUrl)
             .onChange((value: string) => {
               void (async () => {
                 const trimmed = value.trim();
                 // 基本格式校验：必须以 http:// 或 https:// 开头
                 if (trimmed && !/^https?:\/\//.test(trimmed)) {
-                  new Notice('代理地址必须以 http:// 或 https:// 开头');
+                  new Notice('代理地址必须以 HTTP:// 或 HTTPS:// 开头');
                   return;
                 }
                 this.plugin.settings.proxyUrl = trimmed;
@@ -887,7 +889,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     // 语法说明
     const syntaxHint = containerEl.createEl('p', { cls: 'feisync-hint' });
     syntaxHint.createSpan({ text: '语法：' });
-    syntaxHint.createEl('code', { text: 'folder/', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略目录 ' });
+    syntaxHint.createEl('code', { text: 'Folder/', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略目录 ' });
     syntaxHint.createEl('code', { text: '*.ext', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略扩展名 ' });
     syntaxHint.createEl('code', { text: '**/.bak', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 任意位置 ' });
     syntaxHint.createEl('code', { text: '!file.md', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 取消忽略' });

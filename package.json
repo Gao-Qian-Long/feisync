@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.js --watch",
-    "build": "node esbuild.config.js"
+    "build": "node esbuild.config.js",
+    "lint": "eslint ."
   },
   "keywords": [
     "obsidian",
@@ -18,7 +19,10 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^16.18.126",
+    "@typescript-eslint/parser": "^8.59.0",
     "esbuild": "^0.14.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-obsidianmd": "^0.2.4",
     "obsidian": "^1.12.3",
     "typescript": "^4.6.0"
   }

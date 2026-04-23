@@ -19,15 +19,11 @@ const API_RATE_LIMIT_QPS = 5;
 const RATE_LIMIT_WINDOW = 1000;
 
 // 飞书 API 通用响应结构
-interface FeishuApiResponseData {
-  [key: string]: any;
-}
-
 interface FeishuApiResponse {
   code: number;
   msg: string;
-  data?: FeishuApiResponseData;
-  [key: string]: any;
+  data?: unknown;
+  [key: string]: unknown;
 }
 
 // 文件夹/文件元数据结构
@@ -72,7 +68,7 @@ class RateLimiter {
         const oldestInWindow = this.timestamps[0];
         const waitTime = Math.max(0, this.windowMs - (now - oldestInWindow)) + 10; // 额外10ms缓冲
         log.debug(`速率限制：等待 ${waitTime}ms`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, waitTime));
       }
       // 无论是否等待，都记录本次请求的时间戳
       this.timestamps.push(Date.now());
@@ -109,7 +105,7 @@ async function withRetry<T>(
       if (attempt < maxRetries) {
         const delay = 1000 * Math.pow(2, attempt); // 指数退避：1s, 2s, 4s
         log.warn(`${description}失败 (尝试 ${attempt + 1}/${maxRetries + 1})，${delay}ms 后重试: ${msg}`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, delay));
       }
     }
   }
@@ -207,7 +203,7 @@ export class FeishuApiClient {
     // 速率限制
     await this.rateLimiter.acquire();
 
-    const method = (options.method || 'GET') as string;
+    const method = (options.method || 'GET');
     const headers: Record<string, string> = {};
     if (options.headers) {
       if (options.headers instanceof Headers) {
@@ -284,7 +280,7 @@ export class FeishuApiClient {
       // 注意：requestUrl 无法取消，超时后仅抛错终止当前逻辑，底层请求仍在后台执行
       const fetchPromise = requestUrl(requestParams);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`请求超时（${timeout}ms）`)), timeout);
+        activeWindow.setTimeout(() => reject(new Error(`请求超时（${timeout}ms）`)), timeout);
       });
       const response = await Promise.race([fetchPromise, timeoutPromise]);
 
@@ -301,7 +297,7 @@ export class FeishuApiClient {
         }
         let errorMsg = `HTTP ${response.status}`;
         try {
-          const errorData = response.json;
+          const errorData = response.json as Record<string, unknown>;
           errorMsg = `HTTP ${response.status}: ${JSON.stringify(errorData)}`;
           log.error('API 错误详情:', errorData);
         } catch {
@@ -455,10 +451,23 @@ export class FeishuApiClient {
           throw new Error(`API 错误: ${data.msg}`);
         }
 
-        const files = data.data?.files || [];
+        const listData = data.data as {
+          files?: Array<{
+            token?: string;
+            file_token?: string;
+            name: string;
+            type?: string;
+            mime_type?: string;
+            size?: number;
+            created_time?: string;
+            updated_time?: string;
+          }>;
+          next_page_token?: string;
+        } | undefined;
+        const files = listData?.files || [];
         for (const f of files) {
           allFiles.push({
-            token: f.token || f.file_token,
+            token: f.token || f.file_token || '',
             name: f.name,
             type: f.type || (f.mime_type?.includes('folder') ? 'folder' : 'file'),
             parentToken: folderToken,
@@ -468,7 +477,7 @@ export class FeishuApiClient {
           });
         }
 
-        pageToken = data.data?.next_page_token || '';
+        pageToken = listData?.next_page_token || '';
       } while (pageToken);
 
       return allFiles;
@@ -506,7 +515,8 @@ export class FeishuApiClient {
       }
 
       // API 响应字段是 token，不是 file_token
-      const folderToken = data.data?.token || '';
+      const folderData = data.data as { token?: string } | undefined;
+      const folderToken = folderData?.token || '';
       if (!folderToken) {
         throw new Error('创建文件夹成功但未返回 token');
       }
@@ -596,7 +606,8 @@ export class FeishuApiClient {
         throw new Error(`上传文件失败: ${data.msg}`);
       }
 
-      const fileToken = data.data?.file_token || '';
+      const uploadData = data.data as { file_token?: string } | undefined;
+      const fileToken = uploadData?.file_token || '';
       log.debug(`上传成功: ${fileName} → token=${fileToken}`);
       return fileToken;
     } catch (error) {
@@ -654,8 +665,9 @@ export class FeishuApiClient {
         throw new Error(`分片预上传失败: ${preUploadData.msg}`);
       }
 
-      const uploadId = preUploadData.data?.upload_id;
-      const blockNums = preUploadData.data?.block_num || 0;
+      const prepareData = preUploadData.data as { upload_id?: string; block_num?: number } | undefined;
+      const uploadId = prepareData?.upload_id;
+      const blockNums = prepareData?.block_num || 0;
 
       if (!uploadId) {
         throw new Error('分片预上传成功但未返回 upload_id');
@@ -724,7 +736,8 @@ export class FeishuApiClient {
         throw new Error(`完成分片上传失败: ${completeData.msg}`);
       }
 
-      const fileToken = completeData.data?.file_token || '';
+      const completeResult = completeData.data as { file_token?: string } | undefined;
+      const fileToken = completeResult?.file_token || '';
       log.info(`分片上传完成，file_token: ${fileToken}`);
       return fileToken;
     } catch (error) {
@@ -826,7 +839,7 @@ export class FeishuApiClient {
         if (response.status >= 400) {
           let errorMsg = `HTTP ${response.status}`;
           try {
-            const errorData = response.json;
+            const errorData = response.json as { msg?: string } & Record<string, unknown>;
             log.debug(`错误响应内容: ${JSON.stringify(errorData).substring(0, 500)}`);
             errorMsg = `HTTP ${response.status}: ${errorData.msg || JSON.stringify(errorData)}`;
           } catch {
@@ -852,7 +865,7 @@ export class FeishuApiClient {
         if (attempt < this.maxRetryAttempts) {
           const delay = 1000 * Math.pow(2, attempt);
           log.debug(`${endpointName} 端点下载失败 (尝试 ${attempt + 1}/${this.maxRetryAttempts + 1})，${delay}ms 后重试: ${msg}`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await new Promise(resolve => activeWindow.setTimeout(resolve, delay));
         }
       }
     }
@@ -913,7 +926,8 @@ export class FeishuApiClient {
       throw new Error(`创建导出任务失败: ${errorMsg}`);
     }
 
-    const ticket = createData.data?.ticket;
+    const exportCreateData = createData.data as { ticket?: string } | undefined;
+    const ticket = exportCreateData?.ticket;
     if (!ticket) {
       throw new Error('创建导出任务成功但未返回 ticket');
     }
@@ -934,18 +948,25 @@ export class FeishuApiClient {
         throw new Error(`查询导出任务失败: ${pollData.msg}`);
       }
 
-      const result = pollData.data?.result;
+      const pollResult = pollData.data as {
+        result?: {
+          job_status: number;
+          file_token?: string;
+          job_error_msg?: string;
+        };
+      } | undefined;
+      const result = pollResult?.result;
       if (!result) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, 2000));
         continue;
       }
 
       if (result.job_status === 0) {
-        exportFileToken = result.file_token;
+        exportFileToken = result.file_token ?? null;
         break;
       } else if (result.job_status === 1 || result.job_status === 2) {
         log.debug(`导出任务进行中 (status: ${result.job_status})...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, 2000));
         continue;
       } else {
         throw new Error(`导出失败: ${result.job_error_msg || '未知错误'} (status: ${result.job_status})`);
@@ -1135,7 +1156,8 @@ export class FeishuApiClient {
         throw new Error(`上传文件失败: ${uploadData.msg}`);
       }
 
-      const fileToken = uploadData.data?.file_token;
+      const importUploadData = uploadData.data as { file_token?: string } | undefined;
+      const fileToken = importUploadData?.file_token;
       if (!fileToken) {
         throw new Error('上传文件成功但未返回 file_token');
       }
@@ -1203,7 +1225,11 @@ export class FeishuApiClient {
       throw new Error(`创建导入任务失败: ${data.msg}`);
     }
 
-    const ticket = data.data?.ticket || data.data?.result?.ticket;
+    const importData = data.data as {
+      ticket?: string;
+      result?: { ticket?: string };
+    } | undefined;
+    const ticket = importData?.ticket || importData?.result?.ticket;
     if (!ticket) {
       throw new Error('创建导入任务成功但未返回 ticket');
     }
@@ -1232,17 +1258,24 @@ export class FeishuApiClient {
         throw new Error(`查询导入任务失败: ${data.msg}`);
       }
 
-      const result = data.data?.result;
+      const importPollData = data.data as {
+        result?: {
+          job_status: number;
+          token?: string;
+          job_error_msg?: string;
+        };
+      } | undefined;
+      const result = importPollData?.result;
       if (!result) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, 1000));
         continue;
       }
 
       const jobStatus = result.job_status;
       if (jobStatus === 0) {
-        return result.token;
+        return result.token ?? '';
       } else if (jobStatus === 1 || jobStatus === 2) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => activeWindow.setTimeout(resolve, 2000));
         continue;
       } else {
         throw new Error(`导入失败: ${result.job_error_msg || '未知错误'} (status: ${jobStatus})`);

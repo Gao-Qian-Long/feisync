@@ -17,7 +17,7 @@ export class FileWatcher {
   private plugin: FeiSyncPlugin;
   private watchedPaths: string[] = []; // 监控的本地文件夹路径列表
   private isEnabled: boolean = false;
-  private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private debounceTimers: Map<string, number> = new Map();
   private vault: Vault;
   private ignoreFilter: IgnoreFilter = new IgnoreFilter();
 
@@ -82,7 +82,7 @@ export class FileWatcher {
     this.vault.off('rename', this.handleRename as (...args: unknown[]) => unknown);
 
     // 清理所有防抖定时器
-    this.debounceTimers.forEach(timer => clearTimeout(timer));
+    this.debounceTimers.forEach(timer => activeWindow.clearTimeout(timer));
     this.debounceTimers.clear();
   }
 
@@ -291,12 +291,12 @@ export class FileWatcher {
     const key = paths.join('|');
 
     if (this.debounceTimers.has(key)) {
-      clearTimeout(this.debounceTimers.get(key));
+      activeWindow.clearTimeout(this.debounceTimers.get(key));
     }
 
     const delayMs = 5000;
 
-    const timer = setTimeout(() => {
+    const timer = activeWindow.setTimeout(() => {
       void (async () => {
         this.debounceTimers.delete(key);
         log.debug(`防抖结束，触发同步（操作: ${action}, 路径: ${paths.join(' -> ')}）`);
@@ -316,7 +316,7 @@ export class FileWatcher {
    * 立即触发同步
    */
   async triggerImmediateSync(): Promise<void> {
-    this.debounceTimers.forEach(timer => clearTimeout(timer));
+    this.debounceTimers.forEach(timer => activeWindow.clearTimeout(timer));
     this.debounceTimers.clear();
 
     await this.plugin.sync();

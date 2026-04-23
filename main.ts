@@ -35,7 +35,7 @@ export default class FeiSyncPlugin extends Plugin {
   statusBarItemEl: HTMLElement | null = null;
 
   // 定时同步计时器
-  private scheduledSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduledSyncTimer: number | null = null;
 
   // 同步锁，防止并发同步
   private isSyncing: boolean = false;
@@ -114,7 +114,7 @@ export default class FeiSyncPlugin extends Plugin {
    */
   async loadSettings(): Promise<void> {
     try {
-      const loadedData = await this.loadData();
+      const loadedData = (await this.loadData()) as Record<string, unknown> | null;
       const defaults = getDefaultSettings();
       // 过滤掉 loadedData 中 undefined 的值，避免覆盖默认值
       const filteredData: Partial<FeiSyncPluginSettings> = {};
@@ -140,9 +140,9 @@ export default class FeiSyncPlugin extends Plugin {
       }
       // 兼容旧版本：如果 data 中有 feisyncSyncRecords 但 settings.syncRecords 为空，迁移数据
       if (loadedData && loadedData.feisyncSyncRecords && Object.keys(this.settings.syncRecords).length === 0) {
-        const oldRecords = typeof loadedData.feisyncSyncRecords === 'string'
-          ? JSON.parse(loadedData.feisyncSyncRecords)
-          : loadedData.feisyncSyncRecords;
+        const oldRecords: Record<string, import('./syncEngine').FileSyncRecord> = typeof loadedData.feisyncSyncRecords === 'string'
+          ? JSON.parse(loadedData.feisyncSyncRecords) as Record<string, import('./syncEngine').FileSyncRecord>
+          : loadedData.feisyncSyncRecords as Record<string, import('./syncEngine').FileSyncRecord>;
         if (oldRecords && typeof oldRecords === 'object') {
           this.settings.syncRecords = oldRecords;
         }
@@ -252,7 +252,7 @@ export default class FeiSyncPlugin extends Plugin {
     try {
       const tokenStr = this.settings.feishuUserToken;
       if (tokenStr) {
-        const tokenInfo = JSON.parse(tokenStr);
+        const tokenInfo = JSON.parse(tokenStr) as import('./feishuAuth').UserTokenInfo;
         if (tokenInfo) {
           this.authManager?.loadUserTokenFromData(tokenInfo);
           log.debug('用户令牌已加载');
@@ -502,7 +502,7 @@ export default class FeiSyncPlugin extends Plugin {
       this.isSyncing = false;
       release();
       // 3秒后恢复就绪状态
-      setTimeout(() => {
+      activeWindow.setTimeout(() => {
         if (!this.isSyncing) {
           this.updateStatusBar('就绪');
         }
@@ -540,7 +540,7 @@ export default class FeiSyncPlugin extends Plugin {
     } finally {
       this.isSyncing = false;
       release();
-      setTimeout(() => {
+      activeWindow.setTimeout(() => {
         if (!this.isSyncing) {
           this.updateStatusBar('就绪');
         }
@@ -602,7 +602,7 @@ export default class FeiSyncPlugin extends Plugin {
   toggleScheduledSync(enable: boolean): void {
     // 清除旧定时器
     if (this.scheduledSyncTimer) {
-      clearTimeout(this.scheduledSyncTimer);
+      activeWindow.clearTimeout(this.scheduledSyncTimer);
       this.scheduledSyncTimer = null;
     }
 
@@ -611,7 +611,7 @@ export default class FeiSyncPlugin extends Plugin {
       log.info(`启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
 
       const scheduleNext = () => {
-        this.scheduledSyncTimer = setTimeout(() => {
+        this.scheduledSyncTimer = activeWindow.setTimeout(() => {
           void (async () => {
             try {
               log.info('定时同步触发');

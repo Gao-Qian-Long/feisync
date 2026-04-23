@@ -1,5 +1,9 @@
 /* FeiSync Plugin Styles */
 
+.feisync-divider {
+	border-top: 2px solid var(--background-modifier-border);
+}
+
 /* ==================== Settings Tab ==================== */
 
 /* Action row for buttons */
@@ -307,6 +311,19 @@
 	cursor: default;
 	border-bottom: 1px solid var(--background-modifier-border-hover);
 }
+
+/* Tree indentation levels */
+.feisync-tree-level-0 { padding-left: 8px; }
+.feisync-tree-level-1 { padding-left: 24px; }
+.feisync-tree-level-2 { padding-left: 40px; }
+.feisync-tree-level-3 { padding-left: 56px; }
+.feisync-tree-level-4 { padding-left: 72px; }
+.feisync-tree-level-5 { padding-left: 88px; }
+.feisync-tree-level-6 { padding-left: 104px; }
+.feisync-tree-level-7 { padding-left: 120px; }
+.feisync-tree-level-8 { padding-left: 136px; }
+.feisync-tree-level-9 { padding-left: 152px; }
+.feisync-tree-level-10 { padding-left: 168px; }
 
 .feisync-file-tree-item:hover {
 	background-color: var(--background-modifier-hover);

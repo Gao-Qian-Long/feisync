@@ -233,9 +233,8 @@ export class FeishuFolderBrowserModal extends Modal {
 			if (nonFolders.length > 0) {
 				if (folders.length > 0) {
 					// 分隔线
-					const divider = container.createDiv({ cls: 'feisync-file-list-header' });
-					divider.style.borderTop = '2px solid var(--background-modifier-border)';
-					divider.setText(`📄 文件 (${nonFolders.length})`);
+				const divider = container.createDiv({ cls: 'feisync-file-list-header feisync-divider' });
+				divider.setText(`📄 文件 (${nonFolders.length})`);
 				} else {
 					container.createDiv({
 						text: `📄 文件 (${nonFolders.length})`,
@@ -307,8 +306,8 @@ export class FeishuFileTreeModal extends Modal {
 	private isLoading = false;
 	private abortFlag = { aborted: false };
 	private maxDepth = 5;
-	private contentArea: HTMLElement;
-	private statusEl: HTMLElement;
+	private contentArea!: HTMLElement;
+	private statusEl!: HTMLElement;
 
 	constructor(app: App, apiClient: FeishuApiClient, rootToken: string, rootPath: string) {
 		super(app);
@@ -429,8 +428,7 @@ export class FeishuFileTreeModal extends Modal {
 	}
 
 	private renderNode(node: TreeNode, container: HTMLElement, level: number): void {
-		const item = container.createDiv({ cls: 'feisync-file-tree-item' });
-		item.style.paddingLeft = `${level * 16 + 8}px`;
+	const item = container.createDiv({ cls: `feisync-file-tree-item feisync-tree-level-${Math.min(level, 10)}` });
 
 		const isFolder = node.meta.type === 'folder';
 		const hasChildren = isFolder && node.children.length > 0;

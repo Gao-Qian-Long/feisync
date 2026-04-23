@@ -39,3 +39,6 @@ plans/
 # 本地配置文件（包含敏感凭证）
 data.json
 error.txt
+
+# ESLint 临时输出
+lint-output*.txt

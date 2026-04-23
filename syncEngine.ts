@@ -651,7 +651,7 @@ export class SyncEngine {
     // 上传文件（apiClient.uploadFile 会自动判断全量或分片上传）
     const fileBuffer = content instanceof ArrayBuffer
       ? content
-      : new TextEncoder().encode(content as string).buffer as ArrayBuffer;
+      : new TextEncoder().encode(content).buffer;
 
     const fileToken = await this.apiClient.uploadFile(
       new Uint8Array(fileBuffer),
