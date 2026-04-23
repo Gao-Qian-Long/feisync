@@ -3,7 +3,8 @@
  * 负责文件夹管理、文件上传（含分片）、下载、速率限制与重试
  */
 
-import { requestUrl, RequestUrlParam } from 'obsidian';
+import { requestUrl } from 'obsidian';
+import type { RequestUrlParam } from 'obsidian';
 import { FeishuAuthManager } from './feishuAuth';
 import { createLogger } from './logger';
 import { getFeishuFileType } from './fileTypeUtils';
@@ -17,11 +18,26 @@ const API_RATE_LIMIT_QPS = 5;
 // 速率限制窗口（毫秒）
 const RATE_LIMIT_WINDOW = 1000;
 
+// 飞书 API 通用响应结构
+// Data field uses a permissive type since Feishu API responses are dynamic
+/* eslint-disable @typescript-eslint/no-explicit-any */
+interface FeishuApiResponseData {
+  [key: string]: any;
+}
+
+interface FeishuApiResponse {
+  code: number;
+  msg: string;
+  data?: FeishuApiResponseData;
+  [key: string]: any;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 // 文件夹/文件元数据结构
 export interface FeishuFileMeta {
   token: string;
   name: string;
-  type: 'file' | 'folder' | 'docx' | 'sheet' | string;
+  type: string;
   parentToken?: string;
   size?: number;
   createdTime?: number;
@@ -189,9 +205,9 @@ export class FeishuApiClient {
    */
   private async fetchWithTimeout(
     url: string,
-    options: RequestInit & { body?: any },
-    timeout: number = REQUEST_TIMEOUT
-  ): Promise<any> {
+    options: RequestInit & { body?: FormData | string | ArrayBuffer | Record<string, unknown> | Blob },
+    _timeout: number = REQUEST_TIMEOUT
+  ): Promise<FeishuApiResponse> {
     // 速率限制
     await this.rateLimiter.acquire();
 
@@ -210,7 +226,7 @@ export class FeishuApiClient {
     // 判断是否为 FormData 上传
     const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
 
-    let body: any = undefined;
+    let body: ArrayBuffer | string | undefined = undefined;
     if (isFormData) {
       // requestUrl 不支持 FormData，需要手动构建 multipart
       const formData = options.body as FormData;
@@ -218,20 +234,19 @@ export class FeishuApiClient {
       const parts: ArrayBuffer[] = [];
       const encoder = new TextEncoder();
 
-      const entries: [string, any][] = [];
+      const entries: [string, Blob | string][] = [];
       formData.forEach((value, key) => { entries.push([key, value]); });
 
       for (const [key, value] of entries) {
         parts.push(encoder.encode(`--${boundary}\r\n`));
-        if (value instanceof Blob || (typeof File !== 'undefined' && value instanceof File)) {
-          const file = value as File;
-          const fileName = file.name || 'file';
-          const mimeType = file.type || 'application/octet-stream';
+        if (value instanceof Blob) {
+          const fileName = value instanceof File ? value.name : 'file';
+          const mimeType = value.type || 'application/octet-stream';
           parts.push(encoder.encode(
             `Content-Disposition: form-data; name="${key}"; filename="${fileName}"\r\n` +
             `Content-Type: ${mimeType}\r\n\r\n`
           ));
-          parts.push(await file.arrayBuffer());
+          parts.push(await value.arrayBuffer());
           parts.push(encoder.encode('\r\n'));
         } else {
           parts.push(encoder.encode(
@@ -285,7 +300,7 @@ export class FeishuApiClient {
 
       try {
         return response.json;
-      } catch (parseError) {
+      } catch {
         throw new Error(`JSON 解析失败: ${responseText.substring(0, 200)}`);
       }
     } catch (error) {
@@ -302,10 +317,10 @@ export class FeishuApiClient {
    */
   private async apiRequest(
     url: string,
-    options: RequestInit,
+    options: RequestInit & { body?: FormData | string | ArrayBuffer | Record<string, unknown> | Blob },
     timeout: number = REQUEST_TIMEOUT,
     description: string = 'API 请求'
-  ): Promise<any> {
+  ): Promise<FeishuApiResponse> {
     return withRetry(
       () => this.fetchWithTimeout(url, options, timeout),
       this.maxRetryAttempts,
@@ -462,7 +477,7 @@ export class FeishuApiClient {
       const headers = await this.getHeaders();
       const endpoint = this.getApiUrl('/open-apis/drive/v1/files/create_folder');
 
-      const body: any = {
+      const body: Record<string, unknown> = {
         name: folderName,
         folder_token: parentToken || '',
       };
@@ -851,7 +866,7 @@ export class FeishuApiClient {
 
     // 步骤1: 创建导出任务
     const headers = await this.getHeaders(true); // 导出必须使用 user_access_token
-    const exportBody: Record<string, any> = {
+    const exportBody: Record<string, unknown> = {
       token: fileToken,
       type: fileType,
       file_extension: exportType,
@@ -1143,7 +1158,7 @@ export class FeishuApiClient {
     const headers = await this.getHeaders();
     const endpoint = this.getApiUrl('/open-apis/drive/v1/import_tasks');
 
-    const body: Record<string, any> = {
+    const body: Record<string, unknown> = {
       file_extension: fileExtension,
       file_token: fileToken,
       type: type,

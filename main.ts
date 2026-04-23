@@ -9,7 +9,7 @@ import { FeishuAuthManager, validateToken } from './feishuAuth';
 import { FeishuApiClient } from './feishuApi';
 import { FileWatcher } from './fileWatcher';
 import { SyncEngine, FileSyncRecord } from './syncEngine';
-import { SyncFolderConfig, migrateFromLegacyConfig, getEnabledConfigs } from './syncFolderConfig';
+import { migrateFromLegacyConfig, getEnabledConfigs } from './syncFolderConfig';
 import { createLogger } from './logger';
 
 const log = createLogger('Main');
@@ -81,7 +81,7 @@ export default class FeiSyncPlugin extends Plugin {
   /**
    * 插件卸载时调用
    */
-  async onunload(): Promise<void> {
+  onunload(): void {
     log.info('插件卸载中...');
 
     // 停止文件监控
@@ -120,7 +120,7 @@ export default class FeiSyncPlugin extends Plugin {
       if (loadedData) {
         for (const key of Object.keys(defaults) as (keyof FeiSyncPluginSettings)[]) {
           if (loadedData[key] !== undefined) {
-            (filteredData as any)[key] = loadedData[key];
+            Object.assign(filteredData, { [key]: loadedData[key] });
           }
         }
       }
@@ -157,8 +157,8 @@ export default class FeiSyncPlugin extends Plugin {
         log.info(`旧配置已迁移，生成 ${this.settings.syncFolders.length} 条映射`);
       }
       log.info('设置加载成功');
-    } catch (error) {
-      log.error('加载设置失败:', error);
+    } catch {
+      log.error('加载设置失败');
       this.settings = getDefaultSettings();
     }
   }
@@ -203,8 +203,8 @@ export default class FeiSyncPlugin extends Plugin {
       if (this.fileWatcher) {
         await this.fileWatcher.updateConfig(this.settings.localFolderPath, this.settings.autoSyncOnChange);
       }
-    } catch (error) {
-      log.error('保存设置失败:', error);
+    } catch {
+      log.error('保存设置失败');
       new Notice('保存设置失败');
     }
   }
@@ -241,13 +241,13 @@ export default class FeiSyncPlugin extends Plugin {
     log.debug('文件监控器已初始化');
 
     // 从存储中恢复用户授权信息
-    await this.loadUserToken();
+    this.loadUserToken();
   }
 
   /**
    * 从设置中加载用户令牌
    */
-  private async loadUserToken(): Promise<void> {
+  private loadUserToken(): void {
     try {
       const tokenStr = this.settings.feishuUserToken;
       if (tokenStr) {
@@ -257,8 +257,8 @@ export default class FeiSyncPlugin extends Plugin {
           log.debug('用户令牌已加载');
         }
       }
-    } catch (error) {
-      log.error('加载用户令牌失败:', error);
+    } catch {
+      log.error('加载用户令牌失败');
     }
   }
 
@@ -271,8 +271,8 @@ export default class FeiSyncPlugin extends Plugin {
         this.settings.feishuUserToken = JSON.stringify(this.authManager.getUserTokenInfo());
         await this.saveData(this.settings);
         log.debug('用户令牌已保存');
-      } catch (error) {
-        log.error('保存用户令牌失败:', error);
+      } catch {
+        log.error('保存用户令牌失败');
       }
     } else {
       // token 已被清除（如 refresh_token 失效），需要从设置中移除旧 token
@@ -281,8 +281,8 @@ export default class FeiSyncPlugin extends Plugin {
           this.settings.feishuUserToken = '';
           await this.saveData(this.settings);
           log.info('已从存储中移除失效的用户令牌');
-        } catch (error) {
-          log.error('移除用户令牌失败:', error);
+        } catch {
+          log.error('移除用户令牌失败');
         }
       }
     }
@@ -291,7 +291,7 @@ export default class FeiSyncPlugin extends Plugin {
   /**
    * 加载同步记录（从 settings 对象中读取）
    */
-  async loadSyncRecords(): Promise<Record<string, FileSyncRecord>> {
+  loadSyncRecords(): Record<string, FileSyncRecord> {
     if (!this.settings.syncRecords || typeof this.settings.syncRecords !== 'object') {
       this.settings.syncRecords = {};
     }
@@ -308,8 +308,8 @@ export default class FeiSyncPlugin extends Plugin {
       this.settings.syncRecords = records;
       await this.saveData(this.settings);
       log.debug(`已保存 ${Object.keys(records).length} 条同步记录`);
-    } catch (error) {
-      log.error('保存同步记录失败:', error);
+    } catch {
+      log.error('保存同步记录失败');
     }
   }
 
@@ -319,25 +319,25 @@ export default class FeiSyncPlugin extends Plugin {
   private registerCommands(): void {
     // 手动同步命令
     this.addCommand({
-      id: 'feisync-sync',
+      id: 'sync',
       name: 'Sync now',
-      callback: async () => {
-        await this.sync();
+      callback: () => {
+        void this.sync();
       },
     });
 
     // 从飞书下载命令
     this.addCommand({
-      id: 'feisync-download',
-      name: 'Download from Feishu',
-      callback: async () => {
-        await this.downloadFromFeishu();
+      id: 'download',
+      name: 'Download from feishu',
+      callback: () => {
+        void this.downloadFromFeishu();
       },
     });
 
     // 查看同步日志
     this.addCommand({
-      id: 'feisync-log',
+      id: 'log',
       name: 'View sync log',
       callback: () => {
         // 打开设置页面
@@ -350,20 +350,20 @@ export default class FeiSyncPlugin extends Plugin {
    * 添加 Ribbon 图标
    */
   private setupRibbonIcon(): void {
-    this.ribbonIconEl = this.addRibbonIcon('cloud-upload', '同步到飞书', async (evt: MouseEvent) => {
+    this.ribbonIconEl = this.addRibbonIcon('cloud-upload', '同步到飞书', (evt: MouseEvent) => {
       const menu = new Menu();
       menu.addItem((item) => {
         item.setTitle('立即同步')
           .setIcon('sync')
-          .onClick(async () => {
-            await this.sync();
+          .onClick(() => {
+            void this.sync();
           });
       });
       menu.addItem((item) => {
         item.setTitle('从飞书下载')
           .setIcon('download')
-          .onClick(async () => {
-            await this.downloadFromFeishu();
+          .onClick(() => {
+            void this.downloadFromFeishu();
           });
       });
       menu.addItem((item) => {
@@ -388,7 +388,7 @@ export default class FeiSyncPlugin extends Plugin {
   /**
    * 更新状态栏
    */
-  updateStatusBar(text: string, icon?: string): void {
+  updateStatusBar(text: string, _icon?: string): void {
     if (!this.statusBarItemEl) return;
     this.statusBarItemEl.setText(`FeiSync: ${text}`);
     this.statusBarItemEl.title = `FeiSync - ${text}`;

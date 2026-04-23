@@ -19,7 +19,7 @@ let currentLogLevel: LogLevel = LogLevel.INFO;
  */
 export function setLogLevel(level: LogLevel): void {
 	currentLogLevel = level;
-	console.log(`[FeiSync] 日志级别: ${LogLevel[level]}`);
+	console.debug(`[FeiSync] 日志级别: ${LogLevel[level]}`);
 }
 
 /**
@@ -33,12 +33,12 @@ export function getLogLevel(): LogLevel {
  * DEBUG 级别 - 详细调试信息
  * 格式: [模块] message
  */
-export function debug(message: string, ...data: any[]): void {
+export function debug(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.DEBUG) {
 		if (data.length > 0) {
-			console.log(message, ...data);
+			console.debug(message, ...data);
 		} else {
-			console.log(message);
+			console.debug(message);
 		}
 	}
 }
@@ -47,12 +47,12 @@ export function debug(message: string, ...data: any[]): void {
  * INFO 级别 - 常规操作信息
  * 格式: [模块] message
  */
-export function info(message: string, ...data: any[]): void {
+export function info(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.INFO) {
 		if (data.length > 0) {
-			console.log(message, ...data);
+			console.debug(message, ...data);
 		} else {
-			console.log(message);
+			console.debug(message);
 		}
 	}
 }
@@ -61,7 +61,7 @@ export function info(message: string, ...data: any[]): void {
  * WARN 级别 - 警告信息
  * 格式: [模块] message
  */
-export function warn(message: string, ...data: any[]): void {
+export function warn(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.WARN) {
 		if (data.length > 0) {
 			console.warn(message, ...data);
@@ -75,7 +75,7 @@ export function warn(message: string, ...data: any[]): void {
  * ERROR 级别 - 错误信息
  * 格式: [模块] message
  */
-export function error(message: string, ...data: any[]): void {
+export function error(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.ERROR) {
 		if (data.length > 0) {
 			console.error(message, ...data);
@@ -92,9 +92,9 @@ export function error(message: string, ...data: any[]): void {
 export function createLogger(module: string) {
 	const prefix = `[${module}]`;
 	return {
-		debug: (message: string, ...data: any[]) => debug(`${prefix} ${message}`, ...data),
-		info: (message: string, ...data: any[]) => info(`${prefix} ${message}`, ...data),
-		warn: (message: string, ...data: any[]) => warn(`${prefix} ${message}`, ...data),
-		error: (message: string, ...data: any[]) => error(`${prefix} ${message}`, ...data),
+		debug: (message: string, ...data: unknown[]) => debug(`${prefix} ${message}`, ...data),
+		info: (message: string, ...data: unknown[]) => info(`${prefix} ${message}`, ...data),
+		warn: (message: string, ...data: unknown[]) => warn(`${prefix} ${message}`, ...data),
+		error: (message: string, ...data: unknown[]) => error(`${prefix} ${message}`, ...data),
 	};
 }

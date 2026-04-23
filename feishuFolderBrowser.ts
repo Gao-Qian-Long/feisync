@@ -85,10 +85,6 @@ export class FeishuFolderBrowserModal extends Modal {
 
 		// 文件列表容器
 		const listContainer = contentEl.createDiv({ cls: 'feisync-folder-browser-list' });
-		listContainer.style.maxHeight = '400px';
-		listContainer.style.overflowY = 'auto';
-		listContainer.style.border = '1px solid var(--background-modifier-border)';
-		listContainer.style.borderRadius = '4px';
 
 		await this.loadAndRenderFolders(listContainer);
 	}
@@ -98,21 +94,11 @@ export class FeishuFolderBrowserModal extends Modal {
 	 */
 	private renderBreadcrumb(container: HTMLElement): void {
 		const breadcrumb = container.createDiv({ cls: 'feisync-breadcrumb' });
-		breadcrumb.style.padding = '8px 0';
-		breadcrumb.style.display = 'flex';
-		breadcrumb.style.flexWrap = 'wrap';
-		breadcrumb.style.gap = '4px';
-		breadcrumb.style.alignItems = 'center';
-		breadcrumb.style.fontSize = '13px';
 
 		// 根目录
-		const rootItem = breadcrumb.createSpan({ text: '🏠 根目录' });
-		rootItem.style.cursor = 'pointer';
-		rootItem.style.padding = '2px 6px';
-		rootItem.style.borderRadius = '3px';
+		const rootItem = breadcrumb.createSpan({ text: '🏠 根目录', cls: 'feisync-breadcrumb-item' });
 		if (!this.currentFolderToken) {
-			rootItem.style.fontWeight = 'bold';
-			rootItem.style.backgroundColor = 'var(--background-modifier-hover)';
+			rootItem.addClass('feisync-breadcrumb-item-active');
 		}
 		rootItem.addEventListener('click', () => {
 			this.currentFolderToken = '';
@@ -122,19 +108,14 @@ export class FeishuFolderBrowserModal extends Modal {
 
 		// 子目录
 		for (let i = 0; i < this.currentPath.length; i++) {
-			const separator = breadcrumb.createSpan({ text: ' / ' });
-			separator.style.color = 'var(--text-muted)';
+			const separator = breadcrumb.createSpan({ text: ' / ', cls: 'feisync-breadcrumb-separator' });
 
 			const item = this.currentPath[i];
 			const isLast = i === this.currentPath.length - 1;
-			const span = breadcrumb.createSpan({ text: item.name });
-			span.style.cursor = 'pointer';
-			span.style.padding = '2px 6px';
-			span.style.borderRadius = '3px';
+			const span = breadcrumb.createSpan({ text: item.name, cls: 'feisync-breadcrumb-item' });
 
 			if (isLast) {
-				span.style.fontWeight = 'bold';
-				span.style.backgroundColor = 'var(--background-modifier-hover)';
+				span.addClass('feisync-breadcrumb-item-active');
 			}
 
 			span.addEventListener('click', () => {
@@ -155,10 +136,7 @@ export class FeishuFolderBrowserModal extends Modal {
 
 		// 显示加载状态
 		container.empty();
-		const loadingEl = container.createDiv({ text: '加载中...' });
-		loadingEl.style.padding = '20px';
-		loadingEl.style.textAlign = 'center';
-		loadingEl.style.color = 'var(--text-muted)';
+		const loadingEl = container.createDiv({ text: '加载中...', cls: 'feisync-loading' });
 
 		try {
 			const files = await this.apiClient.listFolderContents(this.currentFolderToken);
@@ -167,35 +145,17 @@ export class FeishuFolderBrowserModal extends Modal {
 			container.empty();
 
 			if (folders.length === 0) {
-				const emptyEl = container.createDiv({ text: '此目录下没有子文件夹' });
-				emptyEl.style.padding = '20px';
-				emptyEl.style.textAlign = 'center';
-				emptyEl.style.color = 'var(--text-muted)';
+				container.createDiv({ text: '此目录下没有子文件夹', cls: 'feisync-empty' });
 			}
 
 			for (const folder of folders) {
 				const item = container.createDiv({
 					cls: 'feisync-folder-browser-item',
 				});
-				item.style.padding = '8px 12px';
-				item.style.cursor = 'pointer';
-				item.style.borderBottom = '1px solid var(--background-modifier-border)';
-				item.style.display = 'flex';
-				item.style.justifyContent = 'space-between';
-				item.style.alignItems = 'center';
 
-				const nameSpan = item.createSpan({ text: `📁 ${folder.name}` });
+				item.createSpan({ text: `📁 ${folder.name}` });
 
-				const enterBtn = item.createSpan({ text: '进入 →' });
-				enterBtn.style.color = 'var(--text-accent)';
-				enterBtn.style.fontSize = '12px';
-
-				item.addEventListener('mouseenter', () => {
-					item.style.backgroundColor = 'var(--background-modifier-hover)';
-				});
-				item.addEventListener('mouseleave', () => {
-					item.style.backgroundColor = '';
-				});
+				item.createSpan({ text: '进入 →', cls: 'feisync-enter-btn' });
 
 				item.addEventListener('click', () => {
 					this.currentPath.push({ name: folder.name, token: folder.token });
@@ -206,9 +166,7 @@ export class FeishuFolderBrowserModal extends Modal {
 			}
 		} catch (err) {
 			container.empty();
-			const errorEl = container.createDiv({ text: `加载失败: ${(err as Error).message}` });
-			errorEl.style.padding = '20px';
-			errorEl.style.color = 'var(--text-error)';
+			container.createDiv({ text: `加载失败: ${(err as Error).message}`, cls: 'feisync-error-text' });
 			log.error('加载飞书文件夹列表失败:', err);
 		} finally {
 			this.isLoading = false;

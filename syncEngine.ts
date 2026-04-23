@@ -13,8 +13,8 @@ import { FeishuApiClient } from './feishuApi';
 import { Notice } from 'obsidian';
 import { SyncLogEntry } from './settings';
 import { IgnoreFilter, loadIgnoreFilter, FEISYNC_IGNORE_FILE } from './ignoreFilter';
-import { SyncFolderConfig, getEnabledConfigs, createSyncFolderConfig, validateSyncFolderConfig } from './syncFolderConfig';
-import { isBinaryFile, isTextFile } from './fileTypeUtils';
+import { SyncFolderConfig, getEnabledConfigs } from './syncFolderConfig';
+import { isBinaryFile } from './fileTypeUtils';
 import { createLogger } from './logger';
 
 const log = createLogger('SyncEngine');
@@ -538,7 +538,7 @@ export class SyncEngine {
    */
   private async syncFile(
     file: TFile,
-    localFolderPath: string,
+    _localFolderPath: string,
     targetFolderToken: string,
     cloudFiles: FeishuFileMeta[]
   ): Promise<boolean> {
@@ -610,12 +610,19 @@ export class SyncEngine {
 
         // 删除旧文件并上传新文件
         await this.apiClient.deleteFile(cloudFile.token, cloudFile.type);
-        const { fileToken, fileType } = await this.uploadFileContent(file, content, parentFolderToken);
+        const { fileToken } = await this.uploadFileContent(file, content, parentFolderToken);
         log.debug(`文件重新上传成功，token: ${fileToken}`);
         return true;
       } catch (error) {
-        // 下载或比较失败，当作新文件处理
-        log.warn(`检查云端文件失败，当作新文件上传: ${file.path}`, error);
+        // 下载或比较失败，先删除旧文件再重新上传（避免云端出现重复文件）
+        log.warn(`检查云端文件失败，先删除旧文件再上传: ${file.path}`, error);
+        try {
+          await this.apiClient.deleteFile(cloudFile.token, cloudFile.type);
+        } catch (deleteError) {
+          log.warn(`删除旧云端文件失败，继续上传:`, deleteError);
+        }
+        await this.uploadFileContent(file, content, parentFolderToken);
+        return true;
       }
     }
 
@@ -623,7 +630,7 @@ export class SyncEngine {
     log.info(`新文件，上传: ${file.path}`);
     this.addLog('upload', file.path, '新文件');
 
-    const { fileToken, fileType } = await this.uploadFileContent(file, content, parentFolderToken);
+    const { fileToken } = await this.uploadFileContent(file, content, parentFolderToken);
     log.debug(`新文件上传成功，token: ${fileToken}`);
     return true;
   }
@@ -869,7 +876,7 @@ export class SyncEngine {
         if (!folder) {
           try {
             await this.vault.createFolder(subLocalPath);
-          } catch (e) {
+          } catch {
             // 文件夹可能已存在
           }
         }
@@ -954,7 +961,7 @@ export class SyncEngine {
         if (!parentFolder) {
           try {
             await this.vault.createFolder(parentPath);
-          } catch (e) {
+          } catch {
             // 可能已存在
           }
         }

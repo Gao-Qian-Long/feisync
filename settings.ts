@@ -28,15 +28,9 @@ class SyncLogModal extends Modal {
 
     const sortedLogs = [...logs].reverse();
     const container = contentEl.createEl('div', { cls: 'feisync-log-container' });
-    container.style.maxHeight = '500px';
-    container.style.overflowY = 'auto';
-    container.style.fontFamily = 'monospace';
-    container.style.fontSize = '12px';
 
     for (const entry of sortedLogs) {
       const item = container.createEl('div', { cls: 'feisync-log-entry' });
-      item.style.padding = '4px 8px';
-      item.style.borderBottom = '1px solid var(--background-modifier-border)';
 
       const time = new Date(entry.timestamp).toLocaleString();
       const actionColors: Record<string, string> = {
@@ -49,23 +43,18 @@ class SyncLogModal extends Modal {
       };
       const color = actionColors[entry.action] || '#607d8b';
 
-      const timeSpan = item.createEl('span', { text: time });
-      timeSpan.style.color = 'var(--text-muted)';
-      timeSpan.style.marginRight = '8px';
+      item.createEl('span', { text: time, cls: 'feisync-log-time' });
 
-      const actionSpan = item.createEl('span', { text: `[${entry.action.toUpperCase()}]` });
-      actionSpan.style.color = color;
-      actionSpan.style.marginRight = '8px';
-      actionSpan.style.fontWeight = 'bold';
+      const actionSpan = item.createEl('span', { text: `[${entry.action.toUpperCase()}]`, cls: 'feisync-log-action' });
+      actionSpan.setCssProps({ color });
 
       if (entry.filePath) {
-        const fileSpan = item.createEl('span', { text: entry.filePath });
-        fileSpan.style.marginRight = '8px';
+        item.createEl('span', { text: entry.filePath, cls: 'feisync-log-file' });
       }
 
       if (entry.message) {
-        const msgSpan = item.createEl('span', { text: entry.message });
-        msgSpan.style.color = entry.action === 'error' ? '#ff5722' : 'var(--text-muted)';
+        const msgCls = entry.action === 'error' ? 'feisync-log-msg-error' : 'feisync-log-msg-default';
+        item.createEl('span', { text: entry.message, cls: msgCls });
       }
     }
   }
@@ -101,7 +90,7 @@ class AddFolderMappingModal extends Modal {
       .setName('本地文件夹')
       .setDesc('选择要同步到飞书的本地文件夹')
       .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
+        text.inputEl.addClass('feisync-input-width');
         text.setPlaceholder('Notes')
           .onChange((value: string) => {
             this.localPath = value.trim();
@@ -141,7 +130,7 @@ class AddFolderMappingModal extends Modal {
         .setName('飞书文件夹 Token')
         .setDesc('输入飞书云空间中目标文件夹的 token')
         .addText((text: TextComponent) => {
-          text.inputEl.style.width = '100%';
+          text.inputEl.addClass('feisync-input-width');
           text.setPlaceholder('fldcnxxxxxxxx')
             .onChange((value: string) => {
               this.remoteFolderToken = value.trim();
@@ -354,25 +343,11 @@ class FolderSelectModal extends Modal {
     });
 
     const listEl = contentEl.createEl('div', { cls: 'feisync-folder-list' });
-    listEl.style.maxHeight = '400px';
-    listEl.style.overflowY = 'auto';
-    listEl.style.border = '1px solid var(--background-modifier-border)';
-    listEl.style.borderRadius = '4px';
 
     for (const folder of allFolders) {
       const item = listEl.createEl('div', {
         cls: 'feisync-folder-item',
         text: folder.path || '/ (根目录)'
-      });
-      item.style.padding = '8px 12px';
-      item.style.cursor = 'pointer';
-      item.style.borderBottom = '1px solid var(--background-modifier-border)';
-
-      item.addEventListener('mouseenter', () => {
-        item.style.backgroundColor = 'var(--background-modifier-hover)';
-      });
-      item.addEventListener('mouseleave', () => {
-        item.style.backgroundColor = '';
       });
 
       item.addEventListener('click', () => {
@@ -386,9 +361,6 @@ class FolderSelectModal extends Modal {
     this.contentEl.empty();
   }
 }
-
-// 统一的提示文字样式
-const HINT_STYLE = 'font-size: 12px; color: var(--text-muted);';
 
 // 设置选项卡类
 export class FeiSyncSettingTab extends PluginSettingTab {
@@ -404,46 +376,34 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    containerEl.createEl('h2', { text: 'FeiSync 设置' }).style.fontSize = '20px';
+    new Setting(containerEl).setName('FeiSync settings').setHeading();
 
     // ==================== 常用操作（最优先）====================
-    containerEl.createEl('h3', { text: '常用操作' });
+    new Setting(containerEl).setName('Quick actions').setHeading();
 
     const isUserAuthorized = this.plugin.authManager?.isUserAuthorized() ?? false;
     const hasMappings = (this.plugin.settings.syncFolders || []).filter(c => c.enabled).length > 0;
 
     // 授权状态 + 同步按钮 一行
-    const actionRow = containerEl.createDiv();
-    actionRow.style.display = 'flex';
-    actionRow.style.gap = '16px';
-    actionRow.style.alignItems = 'center';
-    actionRow.style.marginBottom = '12px';
-    actionRow.style.flexWrap = 'wrap';
+    const actionRow = containerEl.createDiv({ cls: 'feisync-action-row' });
 
     // 授权状态指示
     const authStatus = actionRow.createSpan({
       text: isUserAuthorized ? '✓ 已授权' : '✗ 未授权',
-      attr: { style: `font-size: 13px; color: ${isUserAuthorized ? '#4caf50' : '#f44336'};` }
+      cls: isUserAuthorized ? 'feisync-auth-authorized' : 'feisync-auth-unauthorized'
     });
     authStatus.title = isUserAuthorized ? '已绑定飞书用户，可以访问个人云空间' : '需要完成用户授权才能访问个人云空间';
 
     // 映射状态
-    const mappingStatus = actionRow.createSpan({
+    actionRow.createSpan({
       text: hasMappings ? `📁 ${hasMappings} 个映射` : '📁 未配置映射',
-      attr: { style: `font-size: 13px; color: ${hasMappings ? 'var(--text-normal)' : 'var(--text-muted)'};` }
+      cls: hasMappings ? 'feisync-mapping-active' : 'feisync-mapping-inactive'
     });
 
     // 同步按钮
-    const syncBtn = actionRow.createEl('button', { text: '立即同步' });
-    syncBtn.style.backgroundColor = 'var(--interactive-accent)';
-    syncBtn.style.color = 'var(--text-on-accent)';
-    syncBtn.style.border = 'none';
-    syncBtn.style.padding = '6px 16px';
-    syncBtn.style.borderRadius = '4px';
-    syncBtn.style.cursor = 'pointer';
-    syncBtn.style.fontSize = '13px';
+    const syncBtn = actionRow.createEl('button', { text: '立即同步', cls: 'feisync-btn-primary' });
     syncBtn.title = '立即执行一次同步操作';
-    syncBtn.onclick = async () => {
+    syncBtn.onclick = () => {
       if (!isUserAuthorized) {
         new Notice('请先完成用户授权');
         return;
@@ -452,56 +412,47 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         new Notice('请先配置文件夹映射');
         return;
       }
-      syncBtn.setAttribute('disabled', 'true');
-      syncBtn.textContent = '同步中...';
-      try {
-        await this.plugin.sync();
-      } catch (e) {
-        new Notice('同步失败');
-      } finally {
-        syncBtn.removeAttribute('disabled');
-        syncBtn.textContent = '立即同步';
-      }
+      void (async () => {
+        syncBtn.setAttribute('disabled', 'true');
+        syncBtn.textContent = '同步中...';
+        try {
+          await this.plugin.sync();
+        } catch {
+          new Notice('同步失败');
+        } finally {
+          syncBtn.removeAttribute('disabled');
+          syncBtn.textContent = '立即同步';
+        }
+      })();
     };
 
     // 下载按钮
-    const downloadBtn = actionRow.createEl('button', { text: '从飞书下载' });
-    downloadBtn.style.backgroundColor = 'var(--interactive-accent)';
-    downloadBtn.style.color = 'var(--text-on-accent)';
-    downloadBtn.style.border = 'none';
-    downloadBtn.style.padding = '6px 16px';
-    downloadBtn.style.borderRadius = '4px';
-    downloadBtn.style.cursor = 'pointer';
-    downloadBtn.style.fontSize = '13px';
+    const downloadBtn = actionRow.createEl('button', { text: '从飞书下载', cls: 'feisync-btn-primary' });
     downloadBtn.title = '将飞书云端的文件下载到本地';
-    downloadBtn.onclick = async () => {
-      downloadBtn.setAttribute('disabled', 'true');
-      downloadBtn.textContent = '下载中...';
-      try {
-        await this.plugin.downloadFromFeishu();
-      } catch (e) {
-        new Notice('下载失败');
-      } finally {
-        downloadBtn.removeAttribute('disabled');
-        downloadBtn.textContent = '从飞书下载';
-      }
+    downloadBtn.onclick = () => {
+      void (async () => {
+        downloadBtn.setAttribute('disabled', 'true');
+        downloadBtn.textContent = '下载中...';
+        try {
+          await this.plugin.downloadFromFeishu();
+        } catch {
+          new Notice('下载失败');
+        } finally {
+          downloadBtn.removeAttribute('disabled');
+          downloadBtn.textContent = '从飞书下载';
+        }
+      })();
     };
 
     // 查看日志按钮
-    const logBtn = actionRow.createEl('button', { text: '查看日志' });
-    logBtn.style.backgroundColor = 'transparent';
-    logBtn.style.border = '1px solid var(--background-modifier-border)';
-    logBtn.style.padding = '6px 16px';
-    logBtn.style.borderRadius = '4px';
-    logBtn.style.cursor = 'pointer';
-    logBtn.style.fontSize = '13px';
+    const logBtn = actionRow.createEl('button', { text: '查看日志', cls: 'feisync-btn-outline' });
     logBtn.title = '查看最近的同步操作记录';
     logBtn.onclick = () => {
       new SyncLogModal(this.app, this.plugin).open();
     };
 
     // ==================== 用户授权 ====================
-    containerEl.createEl('h3', { text: '用户授权' });
+    new Setting(containerEl).setName('User authorization').setHeading();
 
     if (isUserAuthorized) {
       new Setting(containerEl)
@@ -510,21 +461,23 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .addButton((button) => {
           button.setButtonText('解除授权')
             .setWarning()
-            .onClick(async () => {
-              this.plugin.authManager?.clearUserToken();
-              new Notice('已解除用户授权');
-              this.display();
+            .onClick(() => {
+              void (async () => {
+                this.plugin.authManager?.clearUserToken();
+                new Notice('已解除用户授权');
+                this.display();
+              })();
             });
         });
     } else {
-      const authHint = containerEl.createEl('p', {
+      containerEl.createEl('p', {
         text: '需要完成用户授权才能访问个人云空间',
-        attr: { style: HINT_STYLE }
+        cls: 'feisync-hint'
       });
 
-      const callbackHint = containerEl.createEl('p', {
+      containerEl.createEl('p', {
         text: '提示：在飞书开放平台 → 应用功能 → 网页应用，添加回调地址 http://localhost:9527/callback',
-        attr: { style: HINT_STYLE }
+        cls: 'feisync-hint'
       });
 
       new Setting(containerEl)
@@ -551,51 +504,53 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
           button.setButtonText('开始授权')
             .setCta()
-            .onClick(async () => {
-              if (!this.plugin.authManager) {
-                new Notice('认证管理器未初始化');
-                return;
-              }
-
-              if (isAuthorizing) {
-                this.plugin.authManager.abortLocalCallbackServer();
-                return;
-              }
-
-              setCancelState();
-
-              try {
-                const codePromise = this.plugin.authManager.startLocalCallbackServer(9527);
-                const oauthUrl = this.plugin.authManager.generateOAuthUrl('http://localhost:9527/callback');
-                window.open(oauthUrl);
-                new Notice('请在浏览器中完成飞书授权...');
-
-                const code = await codePromise;
-                new Notice('已获取授权码，正在交换令牌...');
-
-                await this.plugin.authManager.exchangeCodeForUserToken(code, 'http://localhost:9527/callback');
-                await this.plugin.saveUserToken();
-                new Notice('授权成功！');
-                this.display();
-              } catch (error) {
-                const msg = (error as Error).message;
-                if (msg !== '授权已取消') {
-                  new Notice('授权失败：' + msg);
+            .onClick(() => {
+              void (async () => {
+                if (!this.plugin.authManager) {
+                  new Notice('认证管理器未初始化');
+                  return;
                 }
-                resetButton();
-              }
+
+                if (isAuthorizing) {
+                  this.plugin.authManager.abortLocalCallbackServer();
+                  return;
+                }
+
+                setCancelState();
+
+                try {
+                  const codePromise = this.plugin.authManager.startLocalCallbackServer(9527);
+                  const oauthUrl = this.plugin.authManager.generateOAuthUrl('http://localhost:9527/callback');
+                  window.open(oauthUrl);
+                  new Notice('请在浏览器中完成飞书授权...');
+
+                  const code = await codePromise;
+                  new Notice('已获取授权码，正在交换令牌...');
+
+                  await this.plugin.authManager.exchangeCodeForUserToken(code, 'http://localhost:9527/callback');
+                  await this.plugin.saveUserToken();
+                  new Notice('授权成功！');
+                  this.display();
+                } catch (error) {
+                  const msg = (error as Error).message;
+                  if (msg !== '授权已取消') {
+                    new Notice('授权失败：' + msg);
+                  }
+                  resetButton();
+                }
+              })();
             });
         });
     }
 
     // ==================== 文件夹映射 ====================
-    containerEl.createEl('h3', { text: '文件夹映射' });
+    new Setting(containerEl).setName('Folder mapping').setHeading();
 
     // 飞书同步根目录（紧凑显示）
     if (this.plugin.settings.feishuRootFolderToken) {
       const rootHint = containerEl.createEl('p', {
         text: `同步根目录: ${this.plugin.settings.feishuRootFolderToken.substring(0, 16)}...`,
-        attr: { style: HINT_STYLE }
+        cls: 'feisync-hint'
       });
       rootHint.title = '所有自动映射的文件夹将在此目录下创建';
     }
@@ -605,60 +560,50 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
     if (syncFolders.length > 0) {
       const listContainer = containerEl.createDiv({ cls: 'feisync-folder-mapping-list' });
-      listContainer.style.marginBottom = '8px';
 
       for (let i = 0; i < syncFolders.length; i++) {
         const config = syncFolders[i];
         const itemContainer = listContainer.createDiv({ cls: 'feisync-folder-mapping-item' });
-        itemContainer.style.display = 'flex';
-        itemContainer.style.alignItems = 'center';
-        itemContainer.style.padding = '6px 0';
-        itemContainer.style.borderBottom = '1px solid var(--background-modifier-border)';
-        itemContainer.style.gap = '8px';
 
         // 启用开关
-        const toggleEl = itemContainer.createEl('input', { type: 'checkbox' });
+        const toggleEl = itemContainer.createEl('input', { type: 'checkbox', cls: 'feisync-toggle' });
         toggleEl.checked = config.enabled;
-        toggleEl.style.cursor = 'pointer';
         toggleEl.title = config.enabled ? '点击禁用' : '点击启用';
-        toggleEl.addEventListener('change', async () => {
-          config.enabled = toggleEl.checked;
-          await this.plugin.saveSettings();
+        toggleEl.addEventListener('change', () => {
+          void (async () => {
+            config.enabled = toggleEl.checked;
+            await this.plugin.saveSettings();
+          })();
         });
 
         // 信息区
-        const infoEl = itemContainer.createDiv();
-        infoEl.style.flex = '1';
-        infoEl.style.fontSize = '13px';
+        const infoEl = itemContainer.createDiv({ cls: 'feisync-mapping-info' });
 
         const pathEl = infoEl.createEl('strong', { text: config.localPath });
         pathEl.title = `本地路径: ${config.localPath}`;
 
         const modeText = config.mode === 'auto' ? '→ 自动创建' : '→ 自定义';
         const lastSync = config.lastSyncTime > 0 ? ` | ${new Date(config.lastSyncTime).toLocaleDateString()}` : ' | 未同步';
-        const modeEl = infoEl.createEl('span', {
+        infoEl.createEl('span', {
           text: modeText + lastSync,
-          attr: { style: 'font-size: 11px; color: var(--text-muted);' }
+          cls: 'feisync-mapping-mode'
         });
 
         // 删除按钮
-        const deleteBtn = itemContainer.createEl('button', { text: '×' });
-        deleteBtn.style.backgroundColor = 'transparent';
-        deleteBtn.style.border = 'none';
-        deleteBtn.style.color = 'var(--text-muted)';
-        deleteBtn.style.fontSize = '16px';
-        deleteBtn.style.cursor = 'pointer';
+        const deleteBtn = itemContainer.createEl('button', { text: '×', cls: 'feisync-delete-btn' });
         deleteBtn.title = '删除此映射';
-        deleteBtn.addEventListener('click', async () => {
-          this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(c => c.localPath !== config.localPath);
-          await this.plugin.saveSettings();
-          this.display();
+        deleteBtn.addEventListener('click', () => {
+          void (async () => {
+            this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(c => c.localPath !== config.localPath);
+            await this.plugin.saveSettings();
+            this.display();
+          })();
         });
       }
     } else {
-      const noMappingHint = containerEl.createEl('p', {
+      containerEl.createEl('p', {
         text: '尚未配置文件夹映射',
-        attr: { style: HINT_STYLE }
+        cls: 'feisync-hint'
       });
 
       // 旧版配置迁移提示
@@ -669,16 +614,18 @@ export class FeiSyncSettingTab extends PluginSettingTab {
           .addButton((button) => {
             button.setButtonText('迁移')
               .setCta()
-              .onClick(async () => {
-                const { migrateFromLegacyConfig } = await import('./syncFolderConfig');
-                const newConfigs = migrateFromLegacyConfig(
-                  this.plugin.settings.localFolderPath,
-                  this.plugin.settings.feishuRootFolderToken
-                );
-                this.plugin.settings.syncFolders = newConfigs;
-                await this.plugin.saveSettings();
-                new Notice('旧配置已迁移');
-                this.display();
+              .onClick(() => {
+                void (async () => {
+                  const { migrateFromLegacyConfig } = await import('./syncFolderConfig');
+                  const newConfigs = migrateFromLegacyConfig(
+                    this.plugin.settings.localFolderPath,
+                    this.plugin.settings.feishuRootFolderToken
+                  );
+                  this.plugin.settings.syncFolders = newConfigs;
+                  await this.plugin.saveSettings();
+                  new Notice('旧配置已迁移');
+                  this.display();
+                })();
               });
           });
       }
@@ -692,16 +639,18 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         button.setButtonText('+ 添加映射')
           .setCta()
           .onClick(() => {
-            new AddFolderMappingModal(this.app, this.plugin, async (config: SyncFolderConfig) => {
-              const existing = this.plugin.settings.syncFolders.find(c => c.localPath === config.localPath);
-              if (existing) {
-                new Notice(`文件夹 "${config.localPath}" 已存在映射`);
-                return;
-              }
-              this.plugin.settings.syncFolders.push(config);
-              await this.plugin.saveSettings();
-              this.display();
-              new Notice(`已添加映射: ${config.localPath}`);
+            new AddFolderMappingModal(this.app, this.plugin, (config: SyncFolderConfig) => {
+              void (async () => {
+                const existing = this.plugin.settings.syncFolders.find(c => c.localPath === config.localPath);
+                if (existing) {
+                  new Notice(`文件夹 "${config.localPath}" 已存在映射`);
+                  return;
+                }
+                this.plugin.settings.syncFolders.push(config);
+                await this.plugin.saveSettings();
+                this.display();
+                new Notice(`已添加映射: ${config.localPath}`);
+              })();
             }).open();
           });
       });
@@ -730,18 +679,20 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     }
 
     // ==================== 同步选项 ====================
-    containerEl.createEl('h3', { text: '同步选项' });
+    new Setting(containerEl).setName('Sync options').setHeading();
 
     new Setting(containerEl)
       .setName('自动同步')
       .setDesc('监听本地文件变化，自动上传到飞书')
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.autoSyncOnChange)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.autoSyncOnChange = value;
-            await this.plugin.saveSettings();
-            await this.plugin.toggleFileWatcher(value);
-            this.display();
+          .onChange((value: boolean) => {
+            void (async () => {
+              this.plugin.settings.autoSyncOnChange = value;
+              await this.plugin.saveSettings();
+              await this.plugin.toggleFileWatcher(value);
+              this.display();
+            })();
           });
       });
 
@@ -750,14 +701,16 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .setName('最小同步间隔')
         .setDesc('单位：分钟')
         .addText((text: TextComponent) => {
-          text.inputEl.style.width = '60px';
+          text.inputEl.addClass('feisync-input-small');
           text.setValue(this.plugin.settings.syncInterval.toString())
-            .onChange(async (value: string) => {
-              const num = parseInt(value, 10);
-              if (!isNaN(num) && num > 0 && num <= 1440) {
-                this.plugin.settings.syncInterval = num;
-                await this.plugin.saveSettings();
-              }
+            .onChange((value: string) => {
+              void (async () => {
+                const num = parseInt(value, 10);
+                if (!isNaN(num) && num > 0 && num <= 1440) {
+                  this.plugin.settings.syncInterval = num;
+                  await this.plugin.saveSettings();
+                }
+              })();
             });
         });
     }
@@ -767,11 +720,13 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       .setDesc('按固定间隔自动执行同步')
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.enableScheduledSync)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.enableScheduledSync = value;
-            await this.plugin.saveSettings();
-            this.plugin.toggleScheduledSync(value);
-            this.display();
+          .onChange((value: boolean) => {
+            void (async () => {
+              this.plugin.settings.enableScheduledSync = value;
+              await this.plugin.saveSettings();
+              this.plugin.toggleScheduledSync(value);
+              this.display();
+            })();
           });
       });
 
@@ -780,18 +735,20 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .setName('定时同步间隔')
         .setDesc('单位：分钟')
         .addText((text: TextComponent) => {
-          text.inputEl.style.width = '60px';
+          text.inputEl.addClass('feisync-input-small');
           text.setValue(this.plugin.settings.scheduledSyncInterval.toString())
-            .onChange(async (value: string) => {
-              const num = parseInt(value, 10);
-              if (!isNaN(num) && num > 0 && num <= 1440) {
-                this.plugin.settings.scheduledSyncInterval = num;
-                await this.plugin.saveSettings();
-                if (this.plugin.settings.enableScheduledSync) {
-                  this.plugin.toggleScheduledSync(false);
-                  this.plugin.toggleScheduledSync(true);
+            .onChange((value: string) => {
+              void (async () => {
+                const num = parseInt(value, 10);
+                if (!isNaN(num) && num > 0 && num <= 1440) {
+                  this.plugin.settings.scheduledSyncInterval = num;
+                  await this.plugin.saveSettings();
+                  if (this.plugin.settings.enableScheduledSync) {
+                    this.plugin.toggleScheduledSync(false);
+                    this.plugin.toggleScheduledSync(true);
+                  }
                 }
-              }
+              })();
             });
         });
     }
@@ -801,25 +758,29 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       .setDesc('本地文件删除时，同步删除云端文件')
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.syncOnDelete)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.syncOnDelete = value;
-            await this.plugin.saveSettings();
+          .onChange((value: boolean) => {
+            void (async () => {
+              this.plugin.settings.syncOnDelete = value;
+              await this.plugin.saveSettings();
+            })();
           });
       });
 
     // ==================== 飞书凭证 ====================
-    containerEl.createEl('h3', { text: '飞书凭证' });
+    new Setting(containerEl).setName('Feishu credentials').setHeading();
 
     new Setting(containerEl)
       .setName('App ID')
       .setDesc('飞书开放平台创建应用后获得的 App ID')
       .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
+        text.inputEl.addClass('feisync-input-width');
         text.setPlaceholder('cli_xxxxxxxx')
           .setValue(this.plugin.settings.appId)
-          .onChange(async (value: string) => {
-            this.plugin.settings.appId = value.trim();
-            await this.plugin.saveSettings();
+          .onChange((value: string) => {
+            void (async () => {
+              this.plugin.settings.appId = value.trim();
+              await this.plugin.saveSettings();
+            })();
           });
       });
 
@@ -827,33 +788,37 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       .setName('App Secret')
       .setDesc('对应的 App Secret')
       .addText((text: TextComponent) => {
-        text.inputEl.style.width = '100%';
+        text.inputEl.addClass('feisync-input-width');
         text.inputEl.type = 'password';
         text.setPlaceholder('xxxxxxxxxxxxxxxx')
           .setValue(this.plugin.settings.appSecret)
-          .onChange(async (value: string) => {
-            this.plugin.settings.appSecret = value.trim();
-            await this.plugin.saveSettings();
+          .onChange((value: string) => {
+            void (async () => {
+              this.plugin.settings.appSecret = value.trim();
+              await this.plugin.saveSettings();
+            })();
           });
       });
 
-    const permissionHint = containerEl.createEl('p', {
+    containerEl.createEl('p', {
       text: '提示：请确保在飞书开放平台为应用开启了 "云空间" 权限（drive:drive）',
-      attr: { style: HINT_STYLE }
+      cls: 'feisync-hint'
     });
 
     // ==================== 网络设置 ====================
-    containerEl.createEl('h3', { text: '网络设置' });
+    new Setting(containerEl).setName('Network settings').setHeading();
 
     new Setting(containerEl)
       .setName('使用代理')
       .setDesc('通过代理服务器访问飞书 API')
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.enableProxy)
-          .onChange(async (value: boolean) => {
-            this.plugin.settings.enableProxy = value;
-            await this.plugin.saveSettings();
-            this.display();
+          .onChange((value: boolean) => {
+            void (async () => {
+              this.plugin.settings.enableProxy = value;
+              await this.plugin.saveSettings();
+              this.display();
+            })();
           });
       });
 
@@ -862,12 +827,14 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .setName('代理地址')
         .setDesc('例如：http://proxy.com:8080')
         .addText((text: TextComponent) => {
-          text.inputEl.style.width = '100%';
+          text.inputEl.addClass('feisync-input-width');
           text.setPlaceholder('http://your-proxy.com:8080')
             .setValue(this.plugin.settings.proxyUrl)
-            .onChange(async (value: string) => {
-              this.plugin.settings.proxyUrl = value.trim();
-              await this.plugin.saveSettings();
+            .onChange((value: string) => {
+              void (async () => {
+                this.plugin.settings.proxyUrl = value.trim();
+                await this.plugin.saveSettings();
+              })();
             });
         });
 
@@ -876,43 +843,42 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .setDesc('测试代理和飞书 API 连通性')
         .addButton((button) => {
           button.setButtonText('测试')
-            .onClick(async () => {
-              button.setDisabled(true);
-              button.setButtonText('测试中...');
-              const proxyUrl = this.plugin.settings.proxyUrl;
-              if (proxyUrl) {
-                const r1 = await this.plugin.testStep('local-to-proxy');
-                if (!r1.success) {
-                  new Notice(`✗ ${r1.message}`);
+            .onClick(() => {
+              void (async () => {
+                button.setDisabled(true);
+                button.setButtonText('测试中...');
+                const proxyUrl = this.plugin.settings.proxyUrl;
+                if (proxyUrl) {
+                  const r1 = await this.plugin.testStep('local-to-proxy');
+                  if (!r1.success) {
+                    new Notice(`✗ ${r1.message}`);
+                  } else {
+                    const r2 = await this.plugin.testStep('proxy-to-feishu');
+                    new Notice(r2.success ? `✓ ${r2.message}` : `✗ 代理→飞书: ${r2.message}`);
+                  }
                 } else {
-                  const r2 = await this.plugin.testStep('proxy-to-feishu');
-                  new Notice(r2.success ? `✓ ${r2.message}` : `✗ 代理→飞书: ${r2.message}`);
+                  const result = await this.plugin.testStep('direct-to-feishu');
+                  new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
                 }
-              } else {
-                const result = await this.plugin.testStep('direct-to-feishu');
-                new Notice(result.success ? `✓ ${result.message}` : `✗ ${result.message}`);
-              }
-              button.setDisabled(false);
-              button.setButtonText('测试');
+                button.setDisabled(false);
+                button.setButtonText('测试');
+              })();
             });
         });
     }
 
     // ==================== 忽略规则 ====================
-    containerEl.createEl('h3', { text: '忽略规则' });
+    new Setting(containerEl).setName('Ignore rules').setHeading();
 
     const ignoreFile = this.app.vault.getAbstractFileByPath(FEISYNC_IGNORE_FILE);
 
     // 语法说明（紧凑）
-    const syntaxHint = containerEl.createEl('div', {
-      attr: { style: `${HINT_STYLE} line-height: 1.6; margin-bottom: 8px;` }
-    });
-    syntaxHint.innerHTML = `
-      语法：<code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">folder/</code> 忽略目录 &nbsp;
-      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">*.ext</code> 忽略扩展名 &nbsp;
-      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">**/.bak</code> 任意位置 &nbsp;
-      <code style="font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);">!file.md</code> 取消忽略
-    `;
+    const syntaxHint = containerEl.createEl('div', { cls: 'feisync-syntax-hint' });
+    syntaxHint.createSpan({ text: '语法：' });
+    syntaxHint.createEl('code', { text: 'folder/', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略目录 ' });
+    syntaxHint.createEl('code', { text: '*.ext', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 忽略扩展名 ' });
+    syntaxHint.createEl('code', { text: '**/.bak', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 任意位置 ' });
+    syntaxHint.createEl('code', { text: '!file.md', cls: 'feisync-code' }); syntaxHint.createSpan({ text: ' 取消忽略' });
     syntaxHint.title = '创建 feisync-ignore.md 文件可排除特定文件/文件夹不同步';
 
     if (!ignoreFile) {
@@ -921,15 +887,17 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         .setDesc('生成包含常见忽略项的配置文件')
         .addButton((button) => {
           button.setButtonText('创建')
-            .onClick(async () => {
-              try {
-                const defaultContent = getDefaultIgnoreContent();
-                await this.app.vault.create(FEISYNC_IGNORE_FILE, defaultContent);
-                new Notice(`${FEISYNC_IGNORE_FILE} 已创建`);
-                this.display();
-              } catch (err) {
-                new Notice('创建失败: ' + (err as Error).message);
-              }
+            .onClick(() => {
+              void (async () => {
+                try {
+                  const defaultContent = getDefaultIgnoreContent();
+                  await this.app.vault.create(FEISYNC_IGNORE_FILE, defaultContent);
+                  new Notice(`${FEISYNC_IGNORE_FILE} 已创建`);
+                  this.display();
+                } catch (err) {
+                  new Notice('创建失败: ' + (err as Error).message);
+                }
+              })();
             });
         });
     } else {
@@ -944,22 +912,26 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         })
         .addButton((button) => {
           button.setButtonText('重置')
-            .onClick(async () => {
-              try {
-                const defaultContent = getDefaultIgnoreContent();
-                await this.app.vault.modify(ignoreFile as TFile, defaultContent);
-                new Notice('已重置为默认规则');
-                await this.plugin.syncEngine?.reloadIgnoreFilter();
-                this.plugin.fileWatcher?.reloadIgnoreFilter();
-              } catch (err) {
-                new Notice('重置失败: ' + (err as Error).message);
-              }
+            .onClick(() => {
+              void (async () => {
+                try {
+                  const defaultContent = getDefaultIgnoreContent();
+                  if (ignoreFile instanceof TFile) {
+                    await this.app.vault.modify(ignoreFile, defaultContent);
+                    new Notice('已重置为默认规则');
+                    await this.plugin.syncEngine?.reloadIgnoreFilter();
+                    this.plugin.fileWatcher?.reloadIgnoreFilter();
+                  }
+                } catch (err) {
+                  new Notice('重置失败: ' + (err as Error).message);
+                }
+              })();
             });
         });
     }
 
     // ==================== 高级设置 ====================
-    containerEl.createEl('h3', { text: '高级设置' });
+    new Setting(containerEl).setName('Advanced settings').setHeading();
 
     new Setting(containerEl)
       .setName('并发上传数')
@@ -968,9 +940,11 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         slider.setLimits(1, 10, 1)
           .setValue(this.plugin.settings.maxConcurrentUploads)
           .setDynamicTooltip()
-          .onChange(async (value: number) => {
-            this.plugin.settings.maxConcurrentUploads = value;
-            await this.plugin.saveSettings();
+          .onChange((value: number) => {
+            void (async () => {
+              this.plugin.settings.maxConcurrentUploads = value;
+              await this.plugin.saveSettings();
+            })();
           });
       });
 
@@ -981,14 +955,16 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         slider.setLimits(0, 5, 1)
           .setValue(this.plugin.settings.maxRetryAttempts)
           .setDynamicTooltip()
-          .onChange(async (value: number) => {
-            this.plugin.settings.maxRetryAttempts = value;
-            await this.plugin.saveSettings();
+          .onChange((value: number) => {
+            void (async () => {
+              this.plugin.settings.maxRetryAttempts = value;
+              await this.plugin.saveSettings();
+            })();
           });
       });
 
     // ==================== 数据管理 ====================
-    containerEl.createEl('h3', { text: '数据管理' });
+    new Setting(containerEl).setName('Data management').setHeading();
 
     new Setting(containerEl)
       .setName('重置同步记录')
@@ -996,12 +972,14 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       .addButton((button) => {
         button.setButtonText('重置')
           .setWarning()
-          .onClick(async () => {
-            this.plugin.settings.syncRecords = {};
-            this.plugin.settings.recordsClearedAt = Date.now();
-            await this.plugin.saveSettings();
-            new Notice('同步记录已重置');
-            this.display();
+          .onClick(() => {
+            void (async () => {
+              this.plugin.settings.syncRecords = {};
+              this.plugin.settings.recordsClearedAt = Date.now();
+              await this.plugin.saveSettings();
+              new Notice('同步记录已重置');
+              this.display();
+            })();
           });
       });
 
@@ -1011,10 +989,12 @@ export class FeiSyncSettingTab extends PluginSettingTab {
       .addButton((button) => {
         button.setButtonText('清除')
           .setWarning()
-          .onClick(async () => {
-            this.plugin.settings.syncLog = [];
-            await this.plugin.saveSettings();
-            new Notice('同步日志已清除');
+          .onClick(() => {
+            void (async () => {
+              this.plugin.settings.syncLog = [];
+              await this.plugin.saveSettings();
+              new Notice('同步日志已清除');
+            })();
           });
       });
   }

@@ -4,14 +4,13 @@
  * 以及实现 user_access_token 的 OAuth 授权流程
  */
 
-import { requestUrl, RequestUrlParam } from 'obsidian';
+import { requestUrl } from 'obsidian';
 import * as http from 'http';
 import { createLogger } from './logger';
 
 const log = createLogger('FeishuAuth');
 
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300; // 提前5分钟过期
-const REQUEST_TIMEOUT = 30000; // 请求超时时间（毫秒）
 
 // 用户 token 信息接口
 export interface UserTokenInfo {
@@ -20,6 +19,12 @@ export interface UserTokenInfo {
   expiresAt: number;  // 毫秒时间戳
   openId?: string;
   unionId?: string;
+}
+
+// Token 存储接口
+interface TokenStorage {
+  set(key: string, value: string): void;
+  getString(key: string): string;
 }
 
 export class FeishuAuthManager {
@@ -592,7 +597,7 @@ export class FeishuAuthManager {
   /**
    * 保存用户令牌到本地存储（供下次启动时恢复）
    */
-  saveUserTokenToStorage(storage: any): void {
+  saveUserTokenToStorage(storage: TokenStorage): void {
     if (this.userTokenInfo) {
       storage.set('feishuUserToken', JSON.stringify(this.userTokenInfo));
       log.info('用户令牌已保存');
@@ -604,7 +609,7 @@ export class FeishuAuthManager {
    * 即使 access_token 已过期，只要有 refresh_token 就恢复，
    * 后续调用 getUserAccessToken() 会自动刷新
    */
-  loadUserTokenFromStorage(storage: any): void {
+  loadUserTokenFromStorage(storage: TokenStorage): void {
     const saved = storage.getString('feishuUserToken');
     if (saved) {
       try {

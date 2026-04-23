@@ -164,6 +164,8 @@ export class FileWatcher {
       log.info('.feisyncignore 文件已创建，重新加载忽略规则');
       loadIgnoreFilter(this.vault).then(filter => {
         this.ignoreFilter = filter;
+      }).catch(error => {
+        log.error('重新加载忽略规则失败:', error);
       });
       return;
     }
@@ -193,6 +195,8 @@ export class FileWatcher {
       log.info('.feisyncignore 文件已修改，重新加载忽略规则');
       loadIgnoreFilter(this.vault).then(filter => {
         this.ignoreFilter = filter;
+      }).catch(error => {
+        log.error('重新加载忽略规则失败:', error);
       });
       return;
     }

@@ -106,7 +106,7 @@ export class IgnoreFilter {
 			// 跳过纯描述性文字（非 gitignore 规则）
 			// 判断依据：有效的 gitignore 规则通常包含通配符、路径分隔符、或特殊前缀
 			// 如果行是纯文字（无 *, ?, !, /, # 前缀），则跳过
-			if (!/^(!|[.*?\[#])|(\/$)|(\/.+)/.test(line) && !line.startsWith('/')) {
+			if (!/^(!|[.*?[#])|(\/$)|(\/.+)/.test(line) && !line.startsWith('/')) {
 				// 检查是否包含路径分隔符（用于匹配子目录规则如 "dir/file"）
 				if (!/\//.test(line) && !/^[-+]/.test(line)) {
 					// 纯文字描述，不是有效规则
