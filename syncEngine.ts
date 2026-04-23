@@ -564,14 +564,16 @@ export class SyncEngine {
     const currentHash = await computeHash(content);
 
     // 计算相对于监控文件夹的路径，确定目标文件夹
-    const relativePath = file.path;
+    const relativePath = file.path.startsWith(_localFolderPath + '/')
+      ? file.path.substring(_localFolderPath.length + 1)
+      : file.path;
     const pathParts = relativePath.split('/');
     let parentFolderToken: string;
 
-    if (pathParts.length === 1) {
+    if (pathParts.length <= 1) {
       parentFolderToken = targetFolderToken;
     } else {
-      const subPath = pathParts.slice(1, -1).join('/');
+      const subPath = pathParts.slice(0, -1).join('/');
       parentFolderToken = await this.apiClient.ensureFolderPath(subPath, targetFolderToken);
     }
 
@@ -645,11 +647,7 @@ export class SyncEngine {
   ): Promise<{ fileToken: string; fileType: string }> {
     const fileSize = content instanceof ArrayBuffer ? content.byteLength : new Blob([content]).size;
 
-    if (!this.apiClient.checkFileSize(fileSize)) {
-      throw new Error('文件大小超过限制');
-    }
-
-    // 上传文件
+    // 上传文件（apiClient.uploadFile 会自动判断全量或分片上传）
     const fileBuffer = content instanceof ArrayBuffer
       ? content
       : new TextEncoder().encode(content as string).buffer as ArrayBuffer;
@@ -672,10 +670,12 @@ export class SyncEngine {
   async handleRename(oldPath: string, newPath: string): Promise<void> {
     // 确定文件所属的映射
     const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+    let matchedConfig: SyncFolderConfig | null = null;
     let targetFolderToken: string | null = null;
 
     for (const config of enabledConfigs) {
       if (oldPath.startsWith(config.localPath + '/') || oldPath === config.localPath) {
+        matchedConfig = config;
         targetFolderToken = config.remoteFolderToken || null;
         if (!targetFolderToken) {
           targetFolderToken = await this.ensureFolderForMapping(config);
@@ -692,10 +692,22 @@ export class SyncEngine {
       }
     }
 
-    // 获取云端文件列表，查找旧文件
-    const oldFileName = oldPath.split('/').pop() || oldPath;
+    // 计算 oldPath 相对于映射根目录的路径，确定云端父文件夹
+    const localBase = matchedConfig ? matchedConfig.localPath : this.plugin.settings.localFolderPath || '';
+    let relativeOldPath = oldPath;
+    if (localBase && oldPath.startsWith(localBase + '/')) {
+      relativeOldPath = oldPath.substring(localBase.length + 1);
+    }
+    const pathParts = relativeOldPath.split('/');
+    const oldFileName = pathParts.pop() || oldPath;
+
+    let parentToken = targetFolderToken;
+    if (pathParts.length > 0) {
+      parentToken = await this.apiClient.ensureFolderPath(pathParts.join('/'), targetFolderToken);
+    }
+
     try {
-      const cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      const cloudFiles = await this.apiClient.listFolderContents(parentToken);
       const oldCloudFile = cloudFiles.find(f =>
         f.name === oldFileName || f.name === oldFileName.replace(/\.[^.]+$/, '')
       );
@@ -735,10 +747,12 @@ export class SyncEngine {
 
     // 确定文件所属的映射
     const enabledConfigs = getEnabledConfigs(this.plugin.settings.syncFolders || []);
+    let matchedConfig: SyncFolderConfig | null = null;
     let targetFolderToken: string | null = null;
 
     for (const config of enabledConfigs) {
       if (filePath.startsWith(config.localPath + '/') || filePath === config.localPath) {
+        matchedConfig = config;
         targetFolderToken = config.remoteFolderToken || null;
         if (!targetFolderToken) {
           targetFolderToken = await this.ensureFolderForMapping(config);
@@ -755,10 +769,22 @@ export class SyncEngine {
       }
     }
 
-    // 获取云端文件列表，查找该文件
-    const fileName = filePath.split('/').pop() || filePath;
+    // 计算 filePath 相对于映射根目录的路径，确定云端父文件夹
+    const localBase = matchedConfig ? matchedConfig.localPath : this.plugin.settings.localFolderPath || '';
+    let relativePath = filePath;
+    if (localBase && filePath.startsWith(localBase + '/')) {
+      relativePath = filePath.substring(localBase.length + 1);
+    }
+    const pathParts = relativePath.split('/');
+    const fileName = pathParts.pop() || filePath;
+
+    let parentToken = targetFolderToken;
+    if (pathParts.length > 0) {
+      parentToken = await this.apiClient.ensureFolderPath(pathParts.join('/'), targetFolderToken);
+    }
+
     try {
-      const cloudFiles = await this.apiClient.listFolderContents(targetFolderToken);
+      const cloudFiles = await this.apiClient.listFolderContents(parentToken);
       const cloudFile = cloudFiles.find(f =>
         f.name === fileName || f.name === fileName.replace(/\.[^.]+$/, '')
       );

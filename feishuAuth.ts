@@ -424,10 +424,12 @@ export class FeishuAuthManager {
 
     // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
     const result = data.data || data;
+    const expiresIn = typeof result.expires_in === 'number' ? result.expires_in : 7200;
+    const effectiveExpirySeconds = Math.max(60, expiresIn - TOKEN_EXPIRY_BUFFER_SECONDS);
     const tokenInfo: UserTokenInfo = {
       accessToken: result.access_token,
       refreshToken: result.refresh_token,
-      expiresAt: Date.now() + (result.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
+      expiresAt: Date.now() + effectiveExpirySeconds * 1000,
       openId: result.open_id || '',
       unionId: result.union_id || '',
     };
@@ -477,10 +479,12 @@ export class FeishuAuthManager {
 
     // 兼容 v2 接口的两种返回结构：data.data.xxx 或 data.xxx
     const result = data.data || data;
+    const expiresIn = typeof result.expires_in === 'number' ? result.expires_in : 7200;
+    const effectiveExpirySeconds = Math.max(60, expiresIn - TOKEN_EXPIRY_BUFFER_SECONDS);
     const tokenInfo: UserTokenInfo = {
       accessToken: result.access_token,
       refreshToken: result.refresh_token,
-      expiresAt: Date.now() + (result.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS) * 1000,
+      expiresAt: Date.now() + effectiveExpirySeconds * 1000,
       openId: result.open_id || '',
       unionId: result.union_id || '',
     };
@@ -547,7 +551,7 @@ export class FeishuAuthManager {
         // refresh_token 已被撤销，需要重新授权
         log.warn('refresh_token 已失效，需要重新授权');
         this.clearUserToken();
-        await this.onTokenChange?.();
+        await this.notifyTokenChange();
         throw new Error('用户令牌已过期且刷新失败，请重新授权');
       }
 
@@ -583,15 +587,24 @@ export class FeishuAuthManager {
   }
 
   /**
-   * 生成随机字符串
+   * 生成密码学安全的随机字符串（用于 OAuth state）
    */
   private generateRandomString(length: number): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const array = new Uint8Array(length);
+    crypto.getRandomValues(array);
     let result = '';
     for (let i = 0; i < length; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
+      result += chars[array[i] % chars.length];
     }
     return result;
+  }
+
+  /**
+   * 通知 token 变化（供外部调用，避免直接访问私有属性）
+   */
+  async notifyTokenChange(): Promise<void> {
+    await this.onTokenChange?.();
   }
 
   /**

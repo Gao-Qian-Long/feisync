@@ -92,6 +92,7 @@ class AddFolderMappingModal extends Modal {
       .addText((text: TextComponent) => {
         text.inputEl.addClass('feisync-input-width');
         text.setPlaceholder('Notes')
+          .setValue(this.localPath)
           .onChange((value: string) => {
             this.localPath = value.trim();
           });
@@ -255,10 +256,15 @@ const DEFAULT_SETTINGS: FeiSyncPluginSettings = {
 };
 
 /**
- * 加载默认设置
+ * 加载默认设置（深拷贝，避免共享引用）
  */
 export function getDefaultSettings(): FeiSyncPluginSettings {
-  return Object.assign({}, DEFAULT_SETTINGS);
+  return {
+    ...DEFAULT_SETTINGS,
+    syncLog: [],
+    syncRecords: {},
+    syncFolders: [],
+  };
 }
 
 /**
@@ -382,7 +388,8 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Quick actions').setHeading();
 
     const isUserAuthorized = this.plugin.authManager?.isUserAuthorized() ?? false;
-    const hasMappings = (this.plugin.settings.syncFolders || []).filter(c => c.enabled).length > 0;
+    const mappingCount = (this.plugin.settings.syncFolders || []).filter(c => c.enabled).length;
+    const hasMappings = mappingCount > 0;
 
     // 授权状态 + 同步按钮 一行
     const actionRow = containerEl.createDiv({ cls: 'feisync-action-row' });
@@ -396,7 +403,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
 
     // 映射状态
     actionRow.createSpan({
-      text: hasMappings ? `📁 ${hasMappings} 个映射` : '📁 未配置映射',
+      text: hasMappings ? `📁 ${mappingCount} 个映射` : '📁 未配置映射',
       cls: hasMappings ? 'feisync-mapping-active' : 'feisync-mapping-inactive'
     });
 
@@ -592,7 +599,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
         deleteBtn.title = '删除此映射';
         deleteBtn.addEventListener('click', () => {
           void (async () => {
-            this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(c => c.localPath !== config.localPath);
+            this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(c => c.id !== config.id);
             await this.plugin.saveSettings();
             this.display();
           })();

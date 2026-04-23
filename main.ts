@@ -39,6 +39,7 @@ export default class FeiSyncPlugin extends Plugin {
 
   // 同步锁，防止并发同步
   private isSyncing: boolean = false;
+  private syncLock: Promise<void> = Promise.resolve();
 
   /**
    * 插件加载时调用
@@ -443,25 +444,43 @@ export default class FeiSyncPlugin extends Plugin {
   }
 
   /**
+   * 获取同步锁
+   */
+  private async acquireSyncLock(): Promise<(() => void) | null> {
+    let release: (() => void) | undefined;
+    const lockPromise = new Promise<void>(resolve => { release = resolve; });
+    const prevLock = this.syncLock;
+    this.syncLock = prevLock.then(() => lockPromise);
+    await prevLock;
+
+    if (this.isSyncing) {
+      release?.();
+      new Notice('同步正在进行中，请稍候...');
+      return null;
+    }
+    this.isSyncing = true;
+    return release!;
+  }
+
+  /**
    * 执行同步
    */
   async sync(): Promise<void> {
-    if (this.isSyncing) {
-      new Notice('同步正在进行中，请稍候...');
-      return;
-    }
+    const release = await this.acquireSyncLock();
+    if (!release) return;
 
     if (!this.syncEngine) {
+      release();
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
 
     const preCheck = this.validateForSync();
     if (!preCheck.ready) {
+      release();
       new Notice(preCheck.message);
       return;
     }
 
-    this.isSyncing = true;
     this.updateStatusBar('同步中...');
 
     try {
@@ -474,6 +493,7 @@ export default class FeiSyncPlugin extends Plugin {
       throw error;
     } finally {
       this.isSyncing = false;
+      release();
       // 3秒后恢复就绪状态
       setTimeout(() => {
         if (!this.isSyncing) {
@@ -487,22 +507,21 @@ export default class FeiSyncPlugin extends Plugin {
    * 从飞书下载
    */
   async downloadFromFeishu(): Promise<void> {
-    if (this.isSyncing) {
-      new Notice('同步正在进行中，请稍候...');
-      return;
-    }
+    const release = await this.acquireSyncLock();
+    if (!release) return;
 
     if (!this.syncEngine) {
+      release();
       throw new Error('同步引擎未初始化，请检查凭证配置');
     }
 
     const preCheck = this.validateForSync();
     if (!preCheck.ready) {
+      release();
       new Notice(preCheck.message);
       return;
     }
 
-    this.isSyncing = true;
     this.updateStatusBar('下载中...');
 
     try {
@@ -513,6 +532,7 @@ export default class FeiSyncPlugin extends Plugin {
       throw error;
     } finally {
       this.isSyncing = false;
+      release();
       setTimeout(() => {
         if (!this.isSyncing) {
           this.updateStatusBar('就绪');

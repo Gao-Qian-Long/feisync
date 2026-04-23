@@ -50,9 +50,9 @@ export function debug(message: string, ...data: unknown[]): void {
 export function info(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.INFO) {
 		if (data.length > 0) {
-			console.debug(message, ...data);
+			console.info(message, ...data);
 		} else {
-			console.debug(message);
+			console.info(message);
 		}
 	}
 }

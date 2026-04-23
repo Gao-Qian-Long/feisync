@@ -76,10 +76,9 @@ class RateLimiter {
         const waitTime = Math.max(0, this.windowMs - (now - oldestInWindow)) + 10; // 额外10ms缓冲
         log.debug(`速率限制：等待 ${waitTime}ms`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
-        // 等待结束后，由链中的下一个 .then() 重新检查并记录
-      } else {
-        this.timestamps.push(now);
       }
+      // 无论是否等待，都记录本次请求的时间戳
+      this.timestamps.push(Date.now());
     });
     await this.lock;
   }
@@ -892,8 +891,8 @@ export class FeishuApiClient {
       if (errorCode === 99991679) {
         // 清除旧 token，强制用户重新授权
         this.authManager.clearUserToken();
-        this.authManager['onTokenChange']?.();
-        
+        await this.authManager.notifyTokenChange();
+
         throw new Error(`导出权限不足 (99991679)：当前授权缺少 drive:export:readonly 或 docs:document:export 权限。已清除旧授权，请在设置中重新授权，授权时会自动请求新权限`);
       }
       
