@@ -50,7 +50,7 @@ export default class FeiSyncPlugin extends Plugin {
     await this.loadSettings();
 
     // 2. 初始化模块
-    await this.initializeModules();
+    this.initializeModules();
 
     // 3. 注册设置界面
     this.settingTab = new FeiSyncSettingTab(this.app, this);
@@ -212,7 +212,7 @@ export default class FeiSyncPlugin extends Plugin {
   /**
    * 初始化各模块
    */
-  private async initializeModules(): Promise<void> {
+  private initializeModules(): void {
     log.debug('初始化模块...');
 
     // 认证管理器
@@ -583,13 +583,15 @@ export default class FeiSyncPlugin extends Plugin {
       const intervalMs = this.settings.scheduledSyncInterval * 60 * 1000;
       log.info(`启动定时同步，间隔 ${this.settings.scheduledSyncInterval} 分钟`);
 
-      this.scheduledSyncTimer = setInterval(async () => {
-        try {
-          log.info('定时同步触发');
-          await this.sync();
-        } catch (error) {
-          log.error('定时同步失败:', error);
-        }
+      this.scheduledSyncTimer = setInterval(() => {
+        void (async () => {
+          try {
+            log.info('定时同步触发');
+            await this.sync();
+          } catch (error) {
+            log.error('定时同步失败:', error);
+          }
+        })();
       }, intervalMs);
     } else {
       log.info('定时同步已停止');

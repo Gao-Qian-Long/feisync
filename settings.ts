@@ -127,7 +127,7 @@ class AddFolderMappingModal extends Modal {
     // 自定义模式：飞书文件夹 token
     if (this.mode === 'custom') {
       new Setting(contentEl)
-        .setName('飞书文件夹 Token')
+        .setName('Feishu folder token')
         .setDesc('输入飞书云空间中目标文件夹的 token')
         .addText((text: TextComponent) => {
           text.inputEl.addClass('feisync-input-width');
@@ -376,7 +376,7 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    new Setting(containerEl).setName('FeiSync settings').setHeading();
+    new Setting(containerEl).setName('General').setHeading();
 
     // ==================== 常用操作（最优先）====================
     new Setting(containerEl).setName('Quick actions').setHeading();
@@ -462,11 +462,9 @@ export class FeiSyncSettingTab extends PluginSettingTab {
           button.setButtonText('解除授权')
             .setWarning()
             .onClick(() => {
-              void (async () => {
-                this.plugin.authManager?.clearUserToken();
-                new Notice('已解除用户授权');
-                this.display();
-              })();
+              this.plugin.authManager?.clearUserToken();
+              new Notice('已解除用户授权');
+              this.display();
             });
         });
     } else {

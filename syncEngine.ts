@@ -77,7 +77,7 @@ class ConcurrencyPool {
           const result = await fn();
           resolve(result);
         } catch (error) {
-          reject(error);
+          reject(error instanceof Error ? error : new Error(String(error)));
         } finally {
           this.running--;
           this.next();
@@ -652,7 +652,7 @@ export class SyncEngine {
     // 上传文件
     const fileBuffer = content instanceof ArrayBuffer
       ? content
-      : new TextEncoder().encode(content as string).buffer;
+      : new TextEncoder().encode(content as string).buffer as ArrayBuffer;
 
     const fileToken = await this.apiClient.uploadFile(
       new Uint8Array(fileBuffer),

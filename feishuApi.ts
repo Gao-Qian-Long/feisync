@@ -19,9 +19,9 @@ const API_RATE_LIMIT_QPS = 5;
 const RATE_LIMIT_WINDOW = 1000;
 
 // 飞书 API 通用响应结构
-// Data field uses a permissive type since Feishu API responses are dynamic
-/* eslint-disable @typescript-eslint/no-explicit-any */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
 interface FeishuApiResponseData {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
   [key: string]: any;
 }
 
@@ -29,9 +29,9 @@ interface FeishuApiResponse {
   code: number;
   msg: string;
   data?: FeishuApiResponseData;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Feishu API responses are dynamic with arbitrary keys
   [key: string]: any;
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 // 文件夹/文件元数据结构
 export interface FeishuFileMeta {

@@ -3,8 +3,8 @@
  * 提供在设置界面中浏览飞书云空间文件夹树的弹窗组件
  */
 
-import { App, Modal, Setting, Notice } from 'obsidian';
-import { FeishuApiClient, FeishuFileMeta } from './feishuApi';
+import { App, Modal, Setting } from 'obsidian';
+import { FeishuApiClient } from './feishuApi';
 import { createLogger } from './logger';
 
 const log = createLogger('FeishuFolderBrowser');
@@ -136,7 +136,7 @@ export class FeishuFolderBrowserModal extends Modal {
 
 		// 显示加载状态
 		container.empty();
-		const loadingEl = container.createDiv({ text: '加载中...', cls: 'feisync-loading' });
+		container.createDiv({ text: '加载中...', cls: 'feisync-loading' });
 
 		try {
 			const files = await this.apiClient.listFolderContents(this.currentFolderToken);

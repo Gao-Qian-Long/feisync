@@ -5,10 +5,10 @@
  * 支持多文件夹监控和忽略规则过滤
  */
 
-import { Vault, TAbstractFile, TFolder, TFile } from 'obsidian';
+import { Vault, TAbstractFile, TFolder } from 'obsidian';
 import FeiSyncPlugin from './main';
 import { loadIgnoreFilter, IgnoreFilter, FEISYNC_IGNORE_FILE } from './ignoreFilter';
-import { getEnabledConfigs, SyncFolderConfig } from './syncFolderConfig';
+import { getEnabledConfigs } from './syncFolderConfig';
 import { createLogger } from './logger';
 
 const log = createLogger('FileWatcher');
@@ -291,20 +291,22 @@ export class FileWatcher {
     const key = paths.join('|');
 
     if (this.debounceTimers.has(key)) {
-      clearTimeout(this.debounceTimers.get(key)!);
+      clearTimeout(this.debounceTimers.get(key));
     }
 
     const delayMs = 5000;
 
-    const timer = setTimeout(async () => {
-      this.debounceTimers.delete(key);
-      log.debug(`防抖结束，触发同步（操作: ${action}, 路径: ${paths.join(' -> ')}）`);
+    const timer = setTimeout(() => {
+      void (async () => {
+        this.debounceTimers.delete(key);
+        log.debug(`防抖结束，触发同步（操作: ${action}, 路径: ${paths.join(' -> ')}）`);
 
-      try {
-        await this.plugin.sync();
-      } catch (error) {
-        log.error('自动同步失败:', error);
-      }
+        try {
+          await this.plugin.sync();
+        } catch (error) {
+          log.error('自动同步失败:', error);
+        }
+      })();
     }, delayMs);
 
     this.debounceTimers.set(key, timer);

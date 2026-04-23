@@ -351,7 +351,7 @@ export class FeishuAuthManager {
           if (!resolved) {
             resolved = true;
             cleanup();
-            reject(err);
+            reject(err instanceof Error ? err : new Error(String(err)));
           }
         }
       });
