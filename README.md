@@ -268,10 +268,64 @@ Ribbon icon (`cloud-upload`) provides a quick menu with the same actions plus **
 
 ## Development
 
+### Setup
+
 ```bash
 npm install
-npm run build      # Production build
-npm run dev        # Watch mode
+npm run build      # Production build (generates main.js)
+npm run dev        # Watch mode — rebuilds on file changes
+```
+
+### Code Quality Review (ESLint)
+
+This plugin uses [eslint-plugin-obsidianmd](https://github.com/obsidianmd/eslint-plugin-obsidianmd) to enforce Obsidian-specific best practices and catch common mistakes.
+
+#### Installation
+
+Run this once per project to install the required development dependencies:
+
+```bash
+npm install --save-dev eslint eslint-plugin-obsidianmd @typescript-eslint/parser
+```
+
+#### Running the Linter
+
+```bash
+npm run lint        # Check for issues
+npx eslint . --fix  # Automatically fix fixable issues
+```
+
+#### Configuration
+
+The rules are configured in `eslint.config.mjs` at the project root. The config is already set up — you just need to install the packages above. Key settings:
+
+- **TypeScript parsing**: `@typescript-eslint/parser` is used with `tsconfig.json` to enable typed rule checks
+- **Ignores**: `node_modules/`, `main.js`, `dist/`, `eslint.config.mjs`, `esbuild.config.js`, and all `*.json` files are excluded
+- **Recommended rules**: Uses `obsidianmd` recommended rule set
+
+#### Key ESLint Rules Explained
+
+| Rule | What it catches | Fix |
+|------|----------------|-----|
+| `prefer-active-window-timers` | `setTimeout` instead of `activeWindow.setTimeout` — breaks on mobile | `--fix` auto-fixes |
+| `no-deprecated` | Uses a deprecated Obsidian API | Manual — switch to replacement API |
+| `no-unsupported-api` | Uses an API not available in Obsidian | Manual — remove or replace |
+| `ui/sentence-case` | UI text not in sentence case (e.g., "APP ID" → "app ID") | Manual — rewrite text |
+| `no-static-styles-assignment` | Sets `.style.borderTop = ...` directly in JS | Move styles to CSS classes |
+| `prefer-instanceof` | `instanceof Array` instead of `Array.isArray()` | `--fix` auto-fixes |
+| `no-explicit-any` | Explicit `any` type used — use `unknown` instead | Manual |
+| `no-unsafe-assignment` | Assigning an `any` value to a typed variable | Add type assertion |
+| `no-unsafe-return` | Returning an `any` value from a typed function | Add type assertion |
+| `no-unnecessary-type-assertion` | Assertion doesn't change type (e.g., `x as T` where `x` is already `T`) | Remove assertion or use `as unknown as T` |
+
+> **Tip**: If `--fix` removes a type assertion you need, convert it to `as unknown as T` (double assertion). This pattern is not removed by `--fix`.
+
+#### Re-checking After Manual Edits
+
+If you manually edit files after `--fix`, always run lint again to check for regressions:
+
+```bash
+npm run lint
 ```
 
 ---

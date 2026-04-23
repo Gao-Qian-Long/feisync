@@ -268,10 +268,64 @@ feisync/
 
 ## 开发
 
+### 环境搭建
+
 ```bash
 npm install
-npm run build      # 生产构建
-npm run dev        # 监听模式
+npm run build      # 生产构建（生成 main.js）
+npm run dev        # 监听模式 — 文件变化时自动重新构建
+```
+
+### 代码质量审查（ESLint）
+
+本插件使用 [eslint-plugin-obsidianmd](https://github.com/obsidianmd/eslint-plugin-obsidianmd) 来强制执行 Obsidian 专用最佳实践，并检测常见错误。
+
+#### 安装
+
+每个项目只需运行一次，安装所需的开发依赖：
+
+```bash
+npm install --save-dev eslint eslint-plugin-obsidianmd @typescript-eslint/parser
+```
+
+#### 运行审查
+
+```bash
+npm run lint        # 检查代码问题
+npx eslint . --fix  # 自动修复可修复的问题
+```
+
+#### 配置说明
+
+规则在项目根目录的 `eslint.config.mjs` 中配置。配置已就绪，你只需安装上面的包即可。关键设置：
+
+- **TypeScript 解析**：使用 `@typescript-eslint/parser` 配合 `tsconfig.json` 启用基于类型的规则检查
+- **忽略项**：`node_modules/`、`main.js`、`dist/`、`eslint.config.mjs`、`esbuild.config.js` 及所有 `*.json` 文件不参与检查
+- **推荐规则**：使用 `obsidianmd` 推荐的规则集
+
+#### 常见 ESLint 规则说明
+
+| 规则 | 检测内容 | 修复方式 |
+|------|----------|----------|
+| `prefer-active-window-timers` | 使用 `setTimeout` 而非 `activeWindow.setTimeout` — 移动端无法工作 | `--fix` 自动修复 |
+| `no-deprecated` | 使用了已废弃的 Obsidian API | 手动 — 切换到替代 API |
+| `no-unsupported-api` | 使用了 Obsidian 不支持的 API | 手动 — 移除或替换 |
+| `ui/sentence-case` | UI 文本不符合 sentence case（如 "APP ID" → "app ID"） | 手动 — 重写文本 |
+| `no-static-styles-assignment` | 直接在 JS 中设置 `.style.borderTop = ...` | 改用 CSS 类 |
+| `prefer-instanceof` | 使用 `instanceof Array` 而非 `Array.isArray()` | `--fix` 自动修复 |
+| `no-explicit-any` | 使用了显式 `any` 类型 — 应改用 `unknown` | 手动 |
+| `no-unsafe-assignment` | 将 `any` 类型的值赋值给有类型的变量 | 添加类型断言 |
+| `no-unsafe-return` | 从有类型的函数返回 `any` 类型的值 | 添加类型断言 |
+| `no-unnecessary-type-assertion` | 断言未改变类型（如 `x as T`，其中 `x` 已是 `T`） | 移除断言或使用 `as unknown as T` |
+
+> **提示**：如果 `--fix` 误删了你需要的类型断言，可以改用 `as unknown as T`（双重断言）。此模式不会被 `--fix` 移除。
+
+#### 手动修改后重新审查
+
+如果在 `--fix` 后手动修改了文件，请再次运行 lint 检查是否有回归：
+
+```bash
+npm run lint
 ```
 
 ---
