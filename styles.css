@@ -248,3 +248,99 @@
 	padding: 20px;
 	color: var(--text-error);
 }
+
+/* ==================== File List (in Folder Browser) ==================== */
+
+.feisync-file-list-header {
+	padding: 8px 12px;
+	font-size: 12px;
+	font-weight: bold;
+	color: var(--text-muted);
+	border-bottom: 1px solid var(--background-modifier-border);
+	background-color: var(--background-secondary);
+}
+
+.feisync-file-list-item {
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.feisync-file-list-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.feisync-file-meta {
+	color: var(--text-muted);
+	font-size: 11px;
+	margin-left: auto;
+	white-space: nowrap;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.feisync-file-token {
+	font-size: 10px;
+	color: var(--text-faint);
+	font-family: monospace;
+}
+
+/* ==================== File Tree Modal ==================== */
+
+.feisync-file-tree {
+	max-height: 500px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	margin-top: 8px;
+}
+
+.feisync-file-tree-item {
+	padding: 4px 8px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	cursor: default;
+	border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.feisync-file-tree-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.feisync-tree-toggle {
+	cursor: pointer;
+	width: 16px;
+	text-align: center;
+	font-size: 10px;
+	color: var(--text-muted);
+	user-select: none;
+}
+
+.feisync-tree-toggle-placeholder {
+	width: 16px;
+	display: inline-block;
+}
+
+.feisync-tree-name {
+	flex: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.feisync-tree-meta {
+	color: var(--text-muted);
+	font-size: 11px;
+	white-space: nowrap;
+}
+
+.feisync-tree-token {
+	font-size: 10px;
+	color: var(--text-faint);
+	font-family: monospace;
+}
