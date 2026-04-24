@@ -64,10 +64,10 @@ export class FileWatcher {
   private start(): void {
     log.info(`启动文件监控，监控路径: ${this.watchedPaths.join(', ')}`);
 
-    this.vault.on('create', this.handleCreate as (...args: unknown[]) => unknown);
-    this.vault.on('modify', this.handleModify as (...args: unknown[]) => unknown);
-    this.vault.on('delete', this.handleDelete as (...args: unknown[]) => unknown);
-    this.vault.on('rename', this.handleRename as (...args: unknown[]) => unknown);
+    this.vault.on('create', this.handleCreate);
+    this.vault.on('modify', this.handleModify);
+    this.vault.on('delete', this.handleDelete);
+    this.vault.on('rename', this.handleRename);
   }
 
   /**
@@ -76,10 +76,10 @@ export class FileWatcher {
   stop(): void {
     log.info('停止文件监控');
 
-    this.vault.off('create', this.handleCreate as (...args: unknown[]) => unknown);
-    this.vault.off('modify', this.handleModify as (...args: unknown[]) => unknown);
-    this.vault.off('delete', this.handleDelete as (...args: unknown[]) => unknown);
-    this.vault.off('rename', this.handleRename as (...args: unknown[]) => unknown);
+    this.vault.off('create', this.handleCreate);
+    this.vault.off('modify', this.handleModify);
+    this.vault.off('delete', this.handleDelete);
+    this.vault.off('rename', this.handleRename);
 
     // 清理所有防抖定时器
     this.debounceTimers.forEach(timer => activeWindow.clearTimeout(timer));

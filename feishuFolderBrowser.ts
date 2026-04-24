@@ -232,8 +232,8 @@ export class FeishuFolderBrowserModal extends Modal {
 			// --- 文件列表 ---
 			if (nonFolders.length > 0) {
 				if (folders.length > 0) {
-					// 分隔线
-				const divider = container.createDiv({ cls: 'feisync-file-list-header feisync-divider' });
+			// 分隔线
+			const divider = container.createDiv({ cls: 'feisync-file-list-header feisync-divider' });
 				divider.setText(`📄 文件 (${nonFolders.length})`);
 				} else {
 					container.createDiv({

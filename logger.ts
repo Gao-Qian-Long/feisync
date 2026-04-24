@@ -1,3 +1,4 @@
+/* eslint-disable obsidianmd/rule-custom-message */
 /**
  * 统一日志模块
  * 统一使用 Obsidian 风格：简洁的 [模块] 消息 格式
@@ -50,9 +51,9 @@ export function debug(message: string, ...data: unknown[]): void {
 export function info(message: string, ...data: unknown[]): void {
 	if (currentLogLevel <= LogLevel.INFO) {
 		if (data.length > 0) {
-			console.debug(message, ...data);
+			console.log(message, ...data);
 		} else {
-			console.debug(message);
+			console.log(message);
 		}
 	}
 }

@@ -383,7 +383,6 @@ export class FeiSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // 标题
-    ;
 
     // ==================== 常用操作（最优先）====================
     new Setting(containerEl).setName('Quick actions').setHeading();
